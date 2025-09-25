@@ -1,140 +1,196 @@
 import torch
 import torch.nn as nn
+from transformers import PreTrainedModel, GPT2Config, GPT2Model
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from typing import Optional
+from .tokenizer import TRANSFORM_TOKENS, VOCAB_SIZE, START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID
 
 
-TRANSFORM_TOKENS = {
-    "[PAD]": 0,        # Padding token (must be 0 for proper masking)
-    "[START]": 1,      # Start token
-    "[END]": 2,        # End token
-    "[NOOP]": 3,       # No operation (identity transformation)
-    "grayscale": 4,
-    "rotate_90": 5,
-    "rotate_180": 6,
-    "rotate_270": 7,
-    "color_jitter": 8,
-    "noise_adding": 9,
-    "crop": 10,
-    "horizontal_flip": 11,
-    "vertical_flip": 12,
-}
-
-class TransformEmbedding(nn.Module):
-    """
-    Embedding layer for transformation tokens.
-    Converts token IDs to dense vector representations.
-    """
-    def __init__(self, vocab_size, embedding_dim, padding_idx=0):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=padding_idx)
-
-    def forward(self, tokens):
-        """
-        Args:
-            tokens: Input token IDs [batch_size, seq_len]
-
-        Returns:
-            torch.Tensor: Embeddings for input tokens [batch_size, seq_len, embedding_dim]
-        """
-        return self.embedding(tokens)
-
-class TransformDecoder(nn.Module):
+class TransformDecoder(PreTrainedModel):
     """
     Transformer-based decoder for predicting sequences of image transformations.
-    Takes image features and generates transformation sequences.
+    Takes an image embedding and generates a sequence of transformation tokens.
+    All tokens, including "noop", are treated as regular operations.
+    Special tokens [PAD], [START], [END] are handled by Hugging Face conventions.
+
+    Input: image_embedding [batch_size, hidden_size]
+    Output: sequence of token IDs from vocabulary (including "noop")
     """
-    def __init__(self, image_feature_dim, embedding_dim, num_heads, num_layers, vocab_size, max_seq_length=20):
+
+    config_class = GPT2Config
+
+    def __init__(self, config: GPT2Config, **kwargs):
+        super().__init__(config)
+        self.hidden_size = config.n_embd
+        self.vocab_size = VOCAB_SIZE  # ← Импортируем из tokenizer.py
+        self.max_length = config.n_positions
+
+        # Initialize transformer (GPT2-style decoder)
+        self.transformer = GPT2Model(config)
+        del self.transformer.wte  # Убираем стандартные word embeddings
+        self.transformer.wte = nn.Identity()  # Заменяем на identity — будем подавать свои inputs_embeds
+
+        # Позиционные эмбеддинги для последовательности
+        self.position_embeddings = nn.Embedding(self.max_length, self.hidden_size)
+
+        # Линейный слой для прогнозирования следующего токена
+        self.lm_head = nn.Linear(self.hidden_size, self.vocab_size)
+
+        # Инициализация весов
+        self.init_weights()
+        self.post_init()
+
+    def init_weights(self):
+        nn.init.xavier_uniform_(self.lm_head.weight)
+        nn.init.zeros_(self.lm_head.bias)
+
+    def forward(
+        self,
+        image_embeddings: torch.FloatTensor,          # [B, H]
+        input_ids: Optional[torch.LongTensor] = None,  # [B, L] — с [START] и [END]
+        attention_mask: Optional[torch.Tensor] = None, # [B, L] — маска для паддинга
+        labels: Optional[torch.LongTensor] = None,     # [B, L] — сдвинутые target
+        **kwargs,
+    ) -> CausalLMOutputWithPast:
+        batch_size = image_embeddings.size(0)
+        seq_len = input_ids.size(1) if input_ids is not None else 1
+
+        # Проверка размерности эмбеддинга
+        if image_embeddings.shape[1] != self.hidden_size:
+            raise ValueError(f"Expected image_embedding dim {self.hidden_size}, got {image_embeddings.shape[1]}")
+
+        # Расширяем image_embedding до длины последовательности: [B, H] --> [B, L, H]
+        hidden_states = image_embeddings.unsqueeze(1).expand(-1, seq_len, -1)
+
+        # Добавляем позиционные эмбеддинги
+        position_ids = torch.arange(seq_len, device=image_embeddings.device).unsqueeze(0).expand(batch_size, -1)
+        position_embeds = self.position_embeddings(position_ids)
+        hidden_states = hidden_states + position_embeds  # [B, L, H]
+
+        # Пропускаем через трансформер (используя inputs_embeds, а не input_ids)
+        transformer_outputs = self.transformer(
+            inputs_embeds=hidden_states,
+            attention_mask=attention_mask,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+
+        sequence_output = transformer_outputs.last_hidden_state  # [B, L, H]
+        logits = self.lm_head(sequence_output)                  # [B, L, V]
+
+        loss = None
+        if labels is not None:
+            # Сдвигаем для causal language modeling: предсказываем следующий токен
+            shift_logits = logits[..., :-1, :].contiguous()      # [B, L-1, V]
+            shift_labels = labels[..., 1:].contiguous()          # [B, L-1]
+
+            # Loss игнорирует -100 (pad в labels)
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fct(shift_logits.view(-1, self.vocab_size), shift_labels.view(-1))
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=transformer_outputs.past_key_values,
+            hidden_states=transformer_outputs.hidden_states,
+            attentions=transformer_outputs.attentions,
+        )
+
+    @torch.no_grad()
+    def generate(
+        self,
+        image_embeddings: torch.FloatTensor,
+        max_length: int = 32,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        do_sample: bool = True,
+        early_stopping: bool = True,
+    ) -> torch.LongTensor:
         """
+        Autoregressive generation of transformation sequence from image embedding.
+
         Args:
-            image_feature_dim: Dimension of input image features
-            embedding_dim: Dimension for token embeddings
-            num_heads: Number of attention heads
-            num_layers: Number of transformer layers
-            vocab_size: Size of transformation vocabulary
-            max_seq_length: Maximum sequence length
-        """
-        super().__init__()
-        self.max_seq_length = max_seq_length
-
-        # Linear projection for image features
-        self.image_projection = nn.Linear(image_feature_dim, embedding_dim)
-
-        # Token embeddings with padding index 0
-        self.token_embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
-
-        # Positional embeddings
-        self.position_embedding = nn.Embedding(max_seq_length, embedding_dim)
-
-        # Transformer decoder layers
-        decoder_layer = nn.TransformerDecoderLayer(embedding_dim, num_heads)
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers)
-
-        # Linear layer for token prediction
-        self.token_predictor = nn.Linear(embedding_dim, vocab_size)
-
-    def create_attention_mask(self, input_tokens):
-        """
-        Create attention mask to ignore padding tokens.
-
-        Args:
-            input_tokens: Input token IDs [batch_size, seq_len]
+            image_embeddings: [batch_size, hidden_size] — уже в нужном пространстве
+            max_length: Максимальная длина генерируемой последовательности
+            temperature: Температура для сэмплинга
+            top_k: Выбор из top-k наиболее вероятных токенов
+            top_p: Nucleus sampling (cumulative probability threshold)
+            do_sample: Если False — greedy decoding
+            early_stopping: Остановить, когда все последовательности достигли [END]
 
         Returns:
-            torch.Tensor: Attention mask [batch_size, seq_len]
+            Generated token IDs: [batch_size, generated_length]
         """
-        return (input_tokens == 0)  # Mask for padding tokens (0 is the index for [PAD])
+        batch_size = image_embeddings.size(0)
+        device = image_embeddings.device
 
-    def forward(self, image_features, target_tokens=None):
-        """
-        Args:
-            image_features: Image features [batch_size, image_feature_dim]
-            target_tokens: Target transformation tokens [batch_size, seq_len] (optional)
+        # Начинаем с [START] токена
+        generated = torch.full((batch_size, 1), START_TOKEN_ID, dtype=torch.long, device=device)
+        past_key_values = None
 
-        Returns:
-            logits: Prediction logits [batch_size, seq_len, vocab_size]
-            or generated sequence if target_tokens is None
-        """
-        batch_size = image_features.size(0)
+        for step in range(max_length):
+            cur_len = generated.size(1)
 
-        # Project image features to embedding dimension
-        memory = self.image_projection(image_features).unsqueeze(0)  # [1, batch_size, embedding_dim]
+            # Расширяем image_embedding до текущей длины последовательности
+            hidden_states = image_embeddings.unsqueeze(1).expand(-1, cur_len, -1)
 
-        if target_tokens is None:
-            # Generation mode
-            input_tokens = torch.full((batch_size, 1), TRANSFORM_TOKENS["[START]"],
-                                     device=image_features.device, dtype=torch.long)
+            # Добавляем позиционные эмбеддинги
+            position_ids = torch.arange(cur_len, device=device).unsqueeze(0).expand(batch_size, -1)
+            position_embeds = self.position_embeddings(position_ids)
+            hidden_states = hidden_states + position_embeds
 
-            generated_tokens = []
-            for step in range(self.max_seq_length):
-                token_embeddings = self.token_embedding(input_tokens)
-                positions = torch.arange(input_tokens.size(1), device=image_features.device).unsqueeze(0)
-                token_embeddings += self.position_embedding(positions)
+            # Forward через декодер
+            outputs = self.transformer(
+                inputs_embeds=hidden_states,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
 
-                decoder_output = self.transformer_decoder(
-                    token_embeddings.transpose(0, 1), memory)
+            # Получаем логиты только для последнего токена
+            logits = self.lm_head(outputs.last_hidden_state[:, -1:, :]).squeeze(1) / temperature  # [B, V]
 
-                logits = self.token_predictor(decoder_output[-1])
+            if do_sample:
+                # Top-k фильтрация
+                if top_k > 0:
+                    indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+                    logits[indices_to_remove] = -float('Inf')
+
+                # Top-p (nucleus) фильтрация
+                if top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                    cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                    logits[indices_to_remove] = -float('Inf')
+
+                # Сэмплинг
+                probs = torch.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                # Greedy decoding
                 next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
-                generated_tokens.append(next_token)
+            # Добавляем к сгенерированной последовательности
+            generated = torch.cat([generated, next_token], dim=1)
 
-                if (next_token == TRANSFORM_TOKENS["[END]"]).all():
-                    break
+            # Early stopping: если все последовательности достигли [END]
+            if early_stopping and (next_token == END_TOKEN_ID).all():
+                break
 
-                input_tokens = torch.cat([input_tokens, next_token], dim=1)
+            # Обновляем past_key_values для следующей итерации
+            past_key_values = outputs.past_key_values
 
-            return torch.cat(generated_tokens, dim=1)
-        else:
-            # Training mode with target tokens
-            token_embeddings = self.token_embedding(target_tokens)
-            positions = torch.arange(target_tokens.size(1), device=image_features.device).unsqueeze(0)
-            token_embeddings += self.position_embedding(positions)
+        return generated
 
-            tgt_mask = self.create_attention_mask(target_tokens)
-
-            decoder_output = self.transformer_decoder(
-                token_embeddings.transpose(0, 1), memory,
-                tgt_key_padding_mask=tgt_mask)
-
-            logits = self.token_predictor(decoder_output)
-
-            return logits
+    def _reorder_cache(self, past_key_values, beam_idx):
+        """
+        Required for beam search compatibility with Hugging Face.
+        Reorders cache tensors according to beam index.
+        """
+        return tuple(
+            tuple(p.index_select(0, beam_idx) for p in layer) for layer in past_key_values
+        )
