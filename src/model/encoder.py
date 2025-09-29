@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
-from efficientnet_pytorch import EfficientNet
 from torchvision import transforms
+from efficientnet_pytorch import EfficientNet
+from typing import Optional
+from omegaconf import DictConfig
 
 
 class ImageEncoder(nn.Module):
@@ -92,32 +94,47 @@ class ImagePairEncoder(nn.Module):
     Encoder for computing similarity features between two sets of images.
     Uses EfficientNet-B3 to extract features from each image.
 
-    Args:
-        embedding_dim (int): Dimension of the output embeddings.
-        freeze_image_encoder (bool): Whether to freeze the image encoder weights. Defaults to True.
-        unfreeze_num_layers (int, optional): Number of last layers to unfreeze. Defaults to None.
+    Accepts an OmegaConf DictConfig object (e.g., config.model.encoder) with the following keys:
+        - embedding_dim (int): Dimension of the output embeddings.
+        - freeze_image_encoder (bool): Whether to freeze the image encoder weights. Defaults to True.
+        - unfreeze_n_layers (int, optional): Number of last layers to unfreeze. Defaults to None.
+
+    Example:
+        >>> config = OmegaConf.load("config.yaml")
+        >>> encoder = ImagePairEncoder(config.model.encoder)
+        >>> out = encoder(img1, img2)  # [B, embedding_dim]
     """
 
-    def __init__(self, embedding_dim, freeze_image_encoder=True, unfreeze_n_layers=None):
+    def __init__(self, config: DictConfig):
+        """
+        Initialize the image pair encoder from a configuration object.
+
+        Args:
+            config (DictConfig): Configuration with keys:
+                - embedding_dim: int
+                - freeze_image_encoder: bool
+                - unfreeze_n_layers: Optional[int]
+        """
         super().__init__()
+        self.config = config
 
         # Initialize image encoder
-        self.image_encoder = ImageEncoder(freeze=freeze_image_encoder)
+        self.image_encoder = ImageEncoder(freeze=config.freeze_image_encoder)
 
         # Unfreeze last layers if specified
-        if unfreeze_n_layers is not None:
-            self.image_encoder.unfreeze_last_layers(unfreeze_n_layers)
+        if config.unfreeze_n_layers is not None:
+            self.image_encoder.unfreeze_last_layers(config.unfreeze_n_layers)
 
         # Initialize feature fuser
-        self.fuser = nn.Linear(self.image_encoder.feature_dim * 2, embedding_dim)
+        self.fuser = nn.Linear(self.image_encoder.feature_dim * 2, config.embedding_dim)
 
     def forward(self, image_batch_1, image_batch_2):
         """
         Forward pass through the image pair encoder.
 
         Args:
-            image_batch_1 (torch.Tensor): First batch of images with shape [batch_size_1, 3, 224, 224].
-            image_batch_2 (torch.Tensor): Second batch of images with shape [batch_size_2, 3, 224, 224].
+            image_batch_1 (torch.Tensor): First batch of images with shape [batch_size, 3, 224, 224].
+            image_batch_2 (torch.Tensor): Second batch of images with shape [batch_size, 3, 224, 224].
 
         Returns:
             torch.Tensor: Fused embeddings for pairs with shape [batch_size, embedding_dim].

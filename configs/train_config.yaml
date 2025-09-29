@@ -1,0 +1,36 @@
+training:
+  start_epoch: 0
+  num_epochs: 15
+  batch_size: 32
+  device: 'cuda'
+  checkpoint_interval: null
+  checkpoint_dir: null
+
+data:
+  tensorboard_logdir: null
+
+model:
+  model_name: 'image_transform_predictor'
+  initialization_weights_path: null
+  encoder:
+    embedding_dim: 512
+    freeze_image_encoder: False
+    unfreeze_n_layers: null
+  decoder:
+    n_embd: 512
+    n_head: 8
+    n_layer: 3
+    max_seq_len: 20
+    vocab_size: 14
+    dropout: 0.1
+    bias: False
+
+optimizer:
+  name: 'AdamW'
+  lr: 0.001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+
+scheduler:
+  milestones: null
+  gamma: 0.5
