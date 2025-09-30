@@ -240,59 +240,78 @@ class TransformDecoder(nn.Module):
         max_new_tokens: int = 10,
         temperature: float = 1.0,
         top_k: Optional[int] = None,
+        do_sample: bool = False,
+        pad_token_id: int = PAD_TOKEN_ID,
+        bos_token_id: int = START_TOKEN_ID,
+        eos_token_id: int = END_TOKEN_ID,
     ) -> torch.Tensor:
         """
         Generate sequences of length (1 + max_new_tokens).
-        - Starts with START_TOKEN_ID.
-        - Never generates PAD_TOKEN_ID.
-        - All tokens after the first END_TOKEN_ID are replaced with PAD.
+        
+        Args:
+            combined_embedding: Image context [B, n_embd].
+            max_new_tokens: Maximum number of new tokens to generate.
+            temperature: Softmax temperature for sampling.
+            top_k: If not None, only sample from top-k logits.
+            do_sample: If False, use greedy decoding (deterministic).
+            pad_token_id: ID of the padding token.
+            bos_token_id: ID of the beginning-of-sequence token.
+            eos_token_id: ID of the end-of-sequence token.
+        
+        Returns:
+            Generated token sequences [B, 1 + max_new_tokens].
         """
         B = combined_embedding.shape[0]
         device = combined_embedding.device
         total_len = 1 + max_new_tokens
-
         if total_len > self.config.max_seq_len:
             raise ValueError(f"Total length {total_len} exceeds max_seq_len {self.config.max_seq_len}")
-
-        idx = torch.full((B, 1), START_TOKEN_ID, dtype=torch.long, device=device)
+        
+        # Initialize with BOS token
+        idx = torch.full((B, 1), bos_token_id, dtype=torch.long, device=device)
         finished = torch.zeros(B, dtype=torch.bool, device=device)
-
+        
         for _ in range(max_new_tokens):
             idx_cond = idx if idx.size(1) <= self.config.max_seq_len else idx[:, -self.config.max_seq_len:]
             logits, _ = self(idx_cond, combined_embedding)
             next_logits = logits[:, -1, :] / temperature
-
-            # Prevent PAD generation
-            next_logits[:, PAD_TOKEN_ID] = -float('inf')
-            next_logits[:, START_TOKEN_ID] = -float('inf')
-
+        
+            # Prevent PAD and BOS generation
+            next_logits[:, pad_token_id] = -float('inf')
+            next_logits[:, bos_token_id] = -float('inf')
+        
             if top_k is not None:
                 k = min(top_k, next_logits.size(-1))
                 v, _ = torch.topk(next_logits, k)
                 next_logits[next_logits < v[:, [-1]]] = -float('inf')
-
-            probs = F.softmax(next_logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1).squeeze(-1)
-
-            newly_finished = (idx_next == END_TOKEN_ID)
+        
+            if not do_sample:
+                # Greedy decoding
+                idx_next = torch.argmax(next_logits, dim=-1)
+            else:
+                # Sampling
+                probs = F.softmax(next_logits, dim=-1)
+                idx_next = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        
+            newly_finished = (idx_next == eos_token_id)
             finished = finished | newly_finished
             idx = torch.cat([idx, idx_next.unsqueeze(-1)], dim=1)
-
+        
             if finished.all():
                 break
-
+        
         # Pad to total_len if needed
         if idx.size(1) < total_len:
-            pad = torch.full((B, total_len - idx.size(1)), PAD_TOKEN_ID, device=device, dtype=torch.long)
+            pad = torch.full((B, total_len - idx.size(1)), pad_token_id, device=device, dtype=torch.long)
             idx = torch.cat([idx, pad], dim=1)
         else:
             idx = idx[:, :total_len]
-
-        # Replace everything after first END with PAD
+        
+        # Replace everything after first EOS with PAD
         for i in range(B):
-            end_pos = (idx[i] == END_TOKEN_ID).nonzero(as_tuple=True)[0]
+            end_pos = (idx[i] == eos_token_id).nonzero(as_tuple=True)[0]
             if end_pos.numel() > 0:
                 first_end = end_pos[0].item()
-                idx[i, first_end + 1:] = PAD_TOKEN_ID
-
+                idx[i, first_end + 1:] = pad_token_id
+        
         return idx
