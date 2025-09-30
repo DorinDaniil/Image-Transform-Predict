@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from torchvision import transforms
 from efficientnet_pytorch import EfficientNet
-from typing import Optional
 from omegaconf import DictConfig
 
 
@@ -92,59 +91,42 @@ class ImageEncoder(nn.Module):
 class ImagePairEncoder(nn.Module):
     """
     Encoder for computing similarity features between two sets of images.
-    Uses EfficientNet-B3 to extract features from each image.
-
-    Accepts an OmegaConf DictConfig object (e.g., config.model.encoder) with the following keys:
-        - embedding_dim (int): Dimension of the output embeddings.
-        - freeze_image_encoder (bool): Whether to freeze the image encoder weights. Defaults to True.
-        - unfreeze_n_layers (int, optional): Number of last layers to unfreeze. Defaults to None.
-
-    Example:
-        >>> config = OmegaConf.load("config.yaml")
-        >>> encoder = ImagePairEncoder(config.model.encoder)
-        >>> out = encoder(img1, img2)  # [B, embedding_dim]
+    If `use_precomputed_embeddings` is True, expects precomputed embeddings as input.
     """
-
     def __init__(self, config: DictConfig):
-        """
-        Initialize the image pair encoder from a configuration object.
-
-        Args:
-            config (DictConfig): Configuration with keys:
-                - embedding_dim: int
-                - freeze_image_encoder: bool
-                - unfreeze_n_layers: Optional[int]
-        """
         super().__init__()
         self.config = config
-
-        # Initialize image encoder
         self.image_encoder = ImageEncoder(freeze=config.freeze_image_encoder)
-
-        # Unfreeze last layers if specified
         if config.unfreeze_n_layers is not None:
             self.image_encoder.unfreeze_last_layers(config.unfreeze_n_layers)
-
-        # Initialize feature fuser
         self.fuser = nn.Linear(self.image_encoder.feature_dim * 2, config.embedding_dim)
 
-    def forward(self, image_batch_1, image_batch_2):
+    def extract_image_embeddings(self, image_batch_1, image_batch_2):
         """
-        Forward pass through the image pair encoder.
-
+        Extract embeddings for two batches of images.
         Args:
             image_batch_1 (torch.Tensor): First batch of images with shape [batch_size, 3, 224, 224].
             image_batch_2 (torch.Tensor): Second batch of images with shape [batch_size, 3, 224, 224].
+        Returns:
+            tuple: (features_1, features_2) — two batches of embeddings.
+        """
+        features_1 = self.image_encoder(image_batch_1)
+        features_2 = self.image_encoder(image_batch_2)
+        return features_1, features_2
 
+    def forward(self, image_batch_1, image_batch_2, use_precomputed_embeddings=False):
+        """
+        Args:
+            image_batch_1 (torch.Tensor): First batch of images or precomputed embeddings.
+            image_batch_2 (torch.Tensor): Second batch of images or precomputed embeddings.
+            use_precomputed_embeddings (bool): If True, inputs are precomputed embeddings. Defaults to False.
         Returns:
             torch.Tensor: Fused embeddings for pairs with shape [batch_size, embedding_dim].
         """
-        # Extract features for both batches
-        features_1 = self.image_encoder(image_batch_1)
-        features_2 = self.image_encoder(image_batch_2)
+        if not use_precomputed_embeddings:
+            features_1, features_2 = self.extract_image_embeddings(image_batch_1, image_batch_2)
+        else:
+            features_1, features_2 = image_batch_1, image_batch_2
 
-        # Concatenate image features
         concatenated_features = torch.cat([features_1, features_2], dim=1)
-
-        # Fuse features
         return self.fuser(concatenated_features)

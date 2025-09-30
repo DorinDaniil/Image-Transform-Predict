@@ -4,9 +4,6 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 from omegaconf import DictConfig
 
-from .tokenizer import VOCAB_SIZE, START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID
-
-
 class CombinedEmbeddingCrossAttention(nn.Module):
     """
     Cross-attention from token sequence to a single combined image embedding.
@@ -32,16 +29,14 @@ class CombinedEmbeddingCrossAttention(nn.Module):
         Args:
             x: Token embeddings [B, T, n_embd].
             combined_embedding: Global image embedding [B, n_embd].
-        
+
         Returns:
             Output of cross-attention [B, T, n_embd].
         """
-        B, T, _ = x.shape
         k = v = combined_embedding.unsqueeze(1)  # [B, 1, n_embd]
         y, _ = self.attn(query=x, key=k, value=v, need_weights=False)
         y = self.resid_dropout(y)
         return y
-
 
 class SelfAttention(nn.Module):
     """
@@ -58,7 +53,7 @@ class SelfAttention(nn.Module):
             batch_first=True,
         )
         self.resid_dropout = nn.Dropout(config.dropout)
-        
+
         # Causal (future) mask: upper triangle = -inf
         mask = torch.triu(
             torch.full((config.max_seq_len, config.max_seq_len), float('-inf')),
@@ -70,13 +65,12 @@ class SelfAttention(nn.Module):
         """
         Args:
             x: Input token embeddings [B, T, n_embd].
-        
+
         Returns:
             Output after causal self-attention [B, T, n_embd].
         """
-        B, T, _ = x.shape
+        _, T, _ = x.shape
         attn_mask = self.future_mask[:T, :T].to(x.device)
-
         y, _ = self.attn(
             query=x,
             key=x,
@@ -86,7 +80,6 @@ class SelfAttention(nn.Module):
         )
         y = self.resid_dropout(y)
         return y
-
 
 class MLP(nn.Module):
     """Feed-forward network with GELU activation."""
@@ -101,7 +94,6 @@ class MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
-
 
 class DecoderBlock(nn.Module):
     """
@@ -128,7 +120,7 @@ class DecoderBlock(nn.Module):
         Args:
             x: Token embeddings [B, T, n_embd].
             combined_embedding: Image embedding [B, n_embd].
-        
+
         Returns:
             Updated token embeddings [B, T, n_embd].
         """
@@ -137,36 +129,25 @@ class DecoderBlock(nn.Module):
         x = x + self.mlp(self.ln_3(x))
         return x
 
-
 class TransformDecoder(nn.Module):
     """
     Autoregressive transformer decoder for generating token sequences conditioned on an image embedding.
-
-    During training:
-        - Input `idx` includes START, tokens, END, and padding up to `max_seq_len`.
-        - `targets` is a left-shifted version of `idx` (i.e., what the model should predict at each step).
-        - Padding tokens (PAD_TOKEN_ID) in `targets` are ignored in the loss.
-
-    Example for a sequence [START, A, B, END] padded to length 6:
-        idx     = [START, A, B, END, PAD, PAD]
-        targets = [A, B, END, PAD, PAD, PAD]
-
-    The loss ignores all positions where `targets == PAD_TOKEN_ID`, so the model only learns
-    to predict real tokens (A, B, END) and never learns to predict PAD.
     """
     def __init__(self, config: DictConfig):
         """
         Initialize the decoder from a configuration object.
-
         Args:
             config (DictConfig): Must contain:
                 - n_embd: int
                 - n_head: int
                 - n_layer: int
                 - max_seq_len: int
-                - vocab_size: int
                 - dropout: float
                 - bias: bool
+                - vocab_size: int
+                - bos_token_id: int
+                - eos_token_id: int
+                - pad_token_id: int
         """
         super().__init__()
         self.config = config
@@ -176,6 +157,11 @@ class TransformDecoder(nn.Module):
         self.blocks = nn.ModuleList([DecoderBlock(config) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd, elementwise_affine=config.bias)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        self.bos_token_id = config.bos_token_id
+        self.eos_token_id = config.eos_token_id
+        self.pad_token_id = config.pad_token_id
+
         self.apply(self._init_weights)
 
     def _init_weights(self, module: nn.Module) -> None:
@@ -194,42 +180,38 @@ class TransformDecoder(nn.Module):
     ) -> torch.Tensor:
         """
         Forward pass for training or inference.
-        
+
         Args:
-            idx: Input token IDs [B, T]. 
+            idx: Input token IDs [B, T].
                  - Starts with START_TOKEN_ID.
                  - Contains real tokens, then END_TOKEN_ID, then PAD_TOKEN_ID up to max_seq_len.
             combined_embedding: Image context [B, n_embd].
             targets: Optional target token IDs [B, T] for training.
                      - Should be `idx` shifted left by one position.
                      - Last token is typically PAD_TOKEN_ID (no next token).
-        
+
         Returns:
             logits: Predicted token logits [B, T, vocab_size].
             loss: Cross-entropy loss (None if targets not provided).
                   Padding positions (where targets == PAD_TOKEN_ID) are ignored.
         """
-        B, T = idx.shape
+        _, T = idx.shape
         assert T <= self.config.max_seq_len, f"Input length {T} > max_seq_len {self.config.max_seq_len}"
-
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
         tok_emb = self.token_embedding(idx)
         pos_emb = self.position_embedding(pos)
         x = self.dropout(tok_emb + pos_emb)
-
         for block in self.blocks:
             x = block(x, combined_embedding)
-
         x = self.ln_f(x)
         logits = self.lm_head(x)
-
         loss = None
         if targets is not None:
             # Ignore padding tokens in loss computation
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
                 targets.reshape(-1),
-                ignore_index=PAD_TOKEN_ID,
+                ignore_index=self.pad_token_id,
             )
         return logits, loss
 
@@ -241,13 +223,13 @@ class TransformDecoder(nn.Module):
         temperature: float = 1.0,
         top_k: Optional[int] = None,
         do_sample: bool = False,
-        pad_token_id: int = PAD_TOKEN_ID,
-        bos_token_id: int = START_TOKEN_ID,
-        eos_token_id: int = END_TOKEN_ID,
+        pad_token_id: int = None,
+        bos_token_id: int = None,
+        eos_token_id: int = None,
     ) -> torch.Tensor:
         """
         Generate sequences of length (1 + max_new_tokens).
-        
+
         Args:
             combined_embedding: Image context [B, n_embd].
             max_new_tokens: Maximum number of new tokens to generate.
@@ -257,7 +239,7 @@ class TransformDecoder(nn.Module):
             pad_token_id: ID of the padding token.
             bos_token_id: ID of the beginning-of-sequence token.
             eos_token_id: ID of the end-of-sequence token.
-        
+
         Returns:
             Generated token sequences [B, 1 + max_new_tokens].
         """
@@ -266,25 +248,32 @@ class TransformDecoder(nn.Module):
         total_len = 1 + max_new_tokens
         if total_len > self.config.max_seq_len:
             raise ValueError(f"Total length {total_len} exceeds max_seq_len {self.config.max_seq_len}")
-        
+
+        if pad_token_id is None:
+            pad_token_id = self.pad_token_id
+        if bos_token_id is None:
+            bos_token_id = self.bos_token_id
+        if eos_token_id is None:
+            eos_token_id = self.eos_token_id
+
         # Initialize with BOS token
         idx = torch.full((B, 1), bos_token_id, dtype=torch.long, device=device)
         finished = torch.zeros(B, dtype=torch.bool, device=device)
-        
+
         for _ in range(max_new_tokens):
             idx_cond = idx if idx.size(1) <= self.config.max_seq_len else idx[:, -self.config.max_seq_len:]
             logits, _ = self(idx_cond, combined_embedding)
             next_logits = logits[:, -1, :] / temperature
-        
+
             # Prevent PAD and BOS generation
             next_logits[:, pad_token_id] = -float('inf')
             next_logits[:, bos_token_id] = -float('inf')
-        
+
             if top_k is not None:
                 k = min(top_k, next_logits.size(-1))
                 v, _ = torch.topk(next_logits, k)
                 next_logits[next_logits < v[:, [-1]]] = -float('inf')
-        
+
             if not do_sample:
                 # Greedy decoding
                 idx_next = torch.argmax(next_logits, dim=-1)
@@ -292,26 +281,26 @@ class TransformDecoder(nn.Module):
                 # Sampling
                 probs = F.softmax(next_logits, dim=-1)
                 idx_next = torch.multinomial(probs, num_samples=1).squeeze(-1)
-        
+
             newly_finished = (idx_next == eos_token_id)
             finished = finished | newly_finished
             idx = torch.cat([idx, idx_next.unsqueeze(-1)], dim=1)
-        
+
             if finished.all():
                 break
-        
+
         # Pad to total_len if needed
         if idx.size(1) < total_len:
             pad = torch.full((B, total_len - idx.size(1)), pad_token_id, device=device, dtype=torch.long)
             idx = torch.cat([idx, pad], dim=1)
         else:
             idx = idx[:, :total_len]
-        
+
         # Replace everything after first EOS with PAD
         for i in range(B):
             end_pos = (idx[i] == eos_token_id).nonzero(as_tuple=True)[0]
             if end_pos.numel() > 0:
                 first_end = end_pos[0].item()
                 idx[i, first_end + 1:] = pad_token_id
-        
+
         return idx

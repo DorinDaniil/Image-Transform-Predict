@@ -1,138 +1,310 @@
-# main.py
 import torch
-from torch.utils.data import Dataset
-from torchvision import transforms
-from PIL import Image
-import numpy as np
-from model.predictor import ImageTransformPredictor
-from model.tokenizer import TransformTokenizer
-from transformers import TrainingArguments, Trainer
-from dataclasses import dataclass
+import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+import os
+from omegaconf import OmegaConf
 
-# ----------------------------
-# 1. СИНТЕТИЧЕСКИЙ ДАТАСЕТ
-# ----------------------------
-class SyntheticImageTransformDataset(Dataset):
-    def __init__(self, n_samples=1000, img_size=(224, 224), max_seq_len=5, noop_prob=0.3):
-        self.n_samples = n_samples
-        self.img_size = img_size
-        self.max_seq_len = max_seq_len
-        self.noop_prob = noop_prob
 
-        self.transforms = [
-            "noop",
-            "grayscale", "rotate_90", "rotate_180", "rotate_270",
-            "color_jitter", "noise_adding", "crop",
-            "horizontal_flip", "vertical_flip"
-        ]
-        self.transform_to_id = {t: i + 3 for i, t in enumerate(self.transforms)}  # 3 = noop ID
+# ======================
+# Metrics
+# ======================
 
-        self.preprocess = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
+def compute_sequence_accuracy(pred_logits, target_ids, pad_token_id):
+    """
+    Exact match accuracy: fraction of sequences where all non-padding tokens are predicted correctly.
+    """
+    pred_ids = pred_logits.argmax(dim=-1)  # [N, T]
+    mask = (target_ids != pad_token_id)
+    correct = (pred_ids == target_ids) | (~mask)
+    seq_correct = correct.all(dim=1)
+    return seq_correct.float().mean().item()
 
-    def __len__(self):
-        return self.n_samples
 
-    def __getitem__(self, idx):
-        is_noop = np.random.rand() < self.noop_prob
+def compute_token_accuracy(pred_logits, target_ids, pad_token_id):
+    """
+    Token-level accuracy: fraction of correctly predicted non-padding tokens.
+    """
+    pred_ids = pred_logits.argmax(dim=-1)
+    mask = (target_ids != pad_token_id)
+    if mask.sum() == 0:
+        return 1.0
+    correct = (pred_ids == target_ids) & mask
+    return correct.sum().float() / mask.sum().float()
 
-        if is_noop:
-            # Одинаковые изображения
-            base_img = torch.randn(3, *self.img_size)
-            img1 = base_img.clone()
-            img2 = base_img.clone()
-            token_ids = [1, 3, 2]  # [START], noop, [END]
-        else:
-            # Разные изображения
-            img1 = torch.randn(3, *self.img_size)
-            img2 = torch.randn(3, *self.img_size)
-            seq_len = np.random.randint(1, self.max_seq_len + 1)
-            seq = np.random.choice(self.transforms, size=seq_len, replace=True).tolist()
-            token_ids = [1] + [self.transform_to_id[t] for t in seq] + [2]
 
-        # Паддинг до 10
-        while len(token_ids) < 10:
-            token_ids.append(0)
+# ======================
+# Utility Functions
+# ======================
 
-        return {
-            "image_batch_1": img1,
-            "image_batch_2": img2,
-            "target_tokens": torch.tensor(token_ids, dtype=torch.long),
-        }
+def create_negative_idx(batch_size, max_seq_len, start_token_id, end_token_id, pad_token_id):
+    """
+    Creates `idx` sequences for negative pairs: [START, END, PAD, PAD, ...].
+    Returns a tensor of shape [batch_size, max_seq_len].
+    """
+    idx = torch.full((batch_size, max_seq_len), pad_token_id, dtype=torch.long)
+    idx[:, 0] = start_token_id
+    if max_seq_len > 1:
+        idx[:, 1] = end_token_id
+    return idx
 
-# ----------------------------
-# 2. DATA COLLATOR
-# ----------------------------
-@dataclass
-class ImageTransformDataCollator:
-    def __call__(self, examples: list) -> dict:
-        return {
-            "image_batch_1": torch.stack([ex["image_batch_1"] for ex in examples]),
-            "image_batch_2": torch.stack([ex["image_batch_2"] for ex in examples]),
-            "target_tokens": torch.stack([ex["target_tokens"] for ex in examples]),
-        }
 
-# ----------------------------
-# 3. ЗАПУСК
-# ----------------------------
-if __name__ == "__main__":
-    # Инициализация модели
-    model = ImageTransformPredictor(
-        embedding_dim=512,
-        num_heads=8,
-        dim_feedforward=1024,
-        num_layers=3,
-        max_seq_length=10,
-        freeze_image_encoder=True,
-        unfreeze_n_layers=2,
+# ======================
+# Configuration and Checkpoint Management
+# ======================
+
+def get_optimizer(net, config):
+    """Initialize optimizer based on config."""
+    optimizer_name = config['optimizer']['name']
+    if optimizer_name == 'Adam':
+        opt = torch.optim.Adam(
+            filter(lambda p: p.requires_grad, net.parameters()),
+            lr=config['optimizer']['lr'],
+            betas=config['optimizer']['betas'],
+            weight_decay=config['optimizer']['weight_decay']
+        )
+    elif optimizer_name == 'AdamW':
+        opt = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, net.parameters()),
+            lr=config['optimizer']['lr'],
+            betas=config['optimizer']['betas'],
+            weight_decay=config['optimizer']['weight_decay']
+        )
+    else:
+        raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+    return opt
+
+
+def get_scheduler(opt, config):
+    """Initialize learning rate scheduler."""
+    sched = torch.optim.lr_scheduler.MultiStepLR(
+        opt,
+        milestones=config['scheduler']['milestones'],
+        gamma=config['scheduler']['gamma']
     )
+    return sched
 
-    # Токенизатор (для декодирования)
-    tokenizer = TransformTokenizer()
 
-    # Датасет
-    dataset = SyntheticImageTransformDataset(n_samples=200, noop_prob=0.3)
+def save_checkpoint(model, optimizer, scheduler, epoch, config):
+    """Save model checkpoint. Creates checkpoint directory if it does not exist."""
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict()
+    }
 
-    # Коллатор
-    collator = ImageTransformDataCollator()
+    checkpoint_dir = config['training']['checkpoint_dir']
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # Training args
-    training_args = TrainingArguments(
-        output_dir="./results",
-        per_device_train_batch_size=8,
-        num_train_epochs=15,
-        learning_rate=3e-4,
-        logging_dir="./logs",
-        logging_steps=10,
-        save_steps=50,
-        evaluation_strategy="no",
-        remove_unused_columns=False,
-        fp16=torch.cuda.is_available(),
-        report_to="none",
-    )
+    checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}.pth')
+    torch.save(checkpoint, checkpoint_path)
+    print(f'Checkpoint saved at epoch {epoch}')
 
-    # Тренировщик
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset,
-        data_collator=collator,
-    )
 
-    print("🚀 Начало обучения...")
-    trainer.train()
+def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
+    """Load model checkpoint if exists."""
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        epoch = checkpoint['epoch']
+        print(f'Checkpoint loaded from epoch {epoch}')
+        return epoch
+    else:
+        print('No checkpoint found. Starting from scratch.')
+        return 0
 
-    print("\n💾 Сохранение модели...")
-    model.save_pretrained("./final_model")
 
-    print("\n🧪 Загрузка и тестирование генерации...")
-    loaded_model = ImageTransformPredictor.from_pretrained("./final_model")
+# ======================
+# Main Training Loop
+# ======================
 
-    # Генерация на примере
-    dummy_img = torch.randn(1, 3, 224, 224)
-    generated_ids = loaded_model.generate(dummy_img, dummy_img, max_length=10)
-    tokens = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-    print("🔮 Предсказание:", tokens)
+def train_model(model, train_loader, val_loader, config):
+    """
+    Train the transformer decoder model with contrastive-like negative sampling.
+    
+    Each batch of size B is expanded to B x B pairs:
+      - Diagonal (i == j): positive pairs with real transformation sequences.
+      - Off-diagonal (i != j): negative pairs with [START, END, PAD, ...] sequences.
+    """
+    optimizer = get_optimizer(model, config)
+    scheduler = get_scheduler(optimizer, config)
+
+    num_epochs = config['training']['num_epochs']
+    device = torch.device(config['training']['device'])
+    checkpoint_interval = config['training']['checkpoint_interval']
+    checkpoint_dir = config['training']['checkpoint_dir']
+    log_dir = config['data']['tensorboard_logdir']
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=log_dir)
+
+    model.to(device)
+
+    # Token IDs and max sequence length from model.decoder config
+    pad_token_id = config.model.decoder.pad_token_id
+    start_token_id = config.model.decoder.bos_token_id  # [START]
+    end_token_id = config.model.decoder.eos_token_id    # [END]
+    max_seq_len = config.model.decoder.max_seq_len
+
+    # Resume from checkpoint if needed
+    start_epoch = 0
+    if config['training']['resume']:
+        checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pth')]
+        if checkpoints:
+            latest_checkpoint = max(
+                [os.path.join(checkpoint_dir, f) for f in checkpoints],
+                key=os.path.getctime
+            )
+            start_epoch = load_checkpoint(model, optimizer, scheduler, latest_checkpoint)
+
+    for epoch in range(start_epoch, num_epochs):
+        model.train()
+        train_loss = 0.0
+        train_seq_acc = 0.0
+        train_token_acc = 0.0
+        total_pairs = 0
+
+        for orig_batch, aug_batch, idx_batch in tqdm(train_loader, desc=f"Train Epoch {epoch+1}"):
+            B = orig_batch.size(0)
+            orig_batch = orig_batch.to(device)      # [B, C, H, W]
+            aug_batch = aug_batch.to(device)        # [B, C, H, W]
+            idx_batch = idx_batch.to(device)        # [B, max_seq_len]
+
+            optimizer.zero_grad()
+
+            # --- 1. Create all B x B image pairs ---
+            B, C, H, W = orig_batch.shape
+            orig_all = orig_batch.unsqueeze(1).expand(B, B, C, H, W).reshape(B * B, C, H, W)
+            aug_all = aug_batch.unsqueeze(0).expand(B, B, C, H, W).reshape(B * B, C, H, W)
+
+            # --- 2. Build full_idx for all pairs ---
+            pos_idx = idx_batch  # [B, max_seq_len]
+            neg_idx = create_negative_idx(
+                batch_size=B * (B - 1),
+                max_seq_len=max_seq_len,
+                start_token_id=start_token_id,
+                end_token_id=end_token_id,
+                pad_token_id=pad_token_id
+            ).to(device)  # [B*(B-1), max_seq_len]
+
+            full_idx = torch.zeros(B*B, max_seq_len, dtype=torch.long, device=device)
+            diag_indices = torch.arange(B, device=device) * (B + 1)
+            full_idx[diag_indices] = pos_idx
+            off_diag_mask = torch.ones(B*B, dtype=torch.bool, device=device)
+            off_diag_mask[diag_indices] = False
+            full_idx[off_diag_mask] = neg_idx
+
+            full_targets = torch.full_like(full_idx, pad_token_id)
+            full_targets[:, :-1] = full_idx[:, 1:]
+
+            # --- 3. Forward pass ---
+            logits, loss = model(
+                orig_all,
+                aug_all,
+                full_idx
+            )
+
+            loss.backward()
+            optimizer.step()
+
+            # --- 4. Compute metrics ---
+            batch_seq_acc = compute_sequence_accuracy(logits, full_targets, pad_token_id)
+            batch_token_acc = compute_token_accuracy(logits, full_targets, pad_token_id)
+
+            n_pairs = B * B
+            train_loss += loss.item() * n_pairs
+            train_seq_acc += batch_seq_acc * n_pairs
+            train_token_acc += batch_token_acc * n_pairs
+            total_pairs += n_pairs
+
+        scheduler.step()
+
+        avg_train_loss = train_loss / total_pairs
+        avg_train_seq_acc = train_seq_acc / total_pairs
+        avg_train_token_acc = train_token_acc / total_pairs
+
+        # ---------------------
+        # Validation (currently uses teacher-forcing; replace with generate() for real eval)
+        # ---------------------
+        model.eval()
+        val_loss = 0.0
+        val_seq_acc = 0.0
+        val_token_acc = 0.0
+        val_total = 0
+
+        with torch.no_grad():
+            for orig_batch, aug_batch, idx_batch in tqdm(val_loader, desc=f"Val Epoch {epoch+1}"):
+                B = orig_batch.size(0)
+                orig_batch = orig_batch.to(device)
+                aug_batch = aug_batch.to(device)
+                idx_batch = idx_batch.to(device)
+
+                # --- Create all B x B image pairs ---
+                B, C, H, W = orig_batch.shape
+                orig_all = orig_batch.unsqueeze(1).expand(B, B, C, H, W).reshape(B * B, C, H, W)
+                aug_all = aug_batch.unsqueeze(0).expand(B, B, C, H, W).reshape(B * B, C, H, W)
+
+                pos_idx = idx_batch
+                neg_idx = create_negative_idx(
+                    batch_size=B * (B - 1),
+                    max_seq_len=max_seq_len,
+                    start_token_id=start_token_id,
+                    end_token_id=end_token_id,
+                    pad_token_id=pad_token_id
+                ).to(device)
+
+                full_idx = torch.zeros(B*B, max_seq_len, dtype=torch.long, device=device)
+                diag_indices = torch.arange(B, device=device) * (B + 1)
+                full_idx[diag_indices] = pos_idx
+                off_diag_mask = torch.ones(B*B, dtype=torch.bool, device=device)
+                off_diag_mask[diag_indices] = False
+                full_idx[off_diag_mask] = neg_idx
+
+                full_targets = torch.full_like(full_idx, pad_token_id)
+                full_targets[:, :-1] = full_idx[:, 1:]
+
+
+                logits, loss = model(
+                    orig_all,
+                    aug_all,
+                    full_idx
+                )
+
+                batch_seq_acc = compute_sequence_accuracy(logits, full_targets, pad_token_id)
+                batch_token_acc = compute_token_accuracy(logits, full_targets, pad_token_id)
+
+                n_pairs = B * B
+                val_loss += loss.item() * n_pairs
+                val_seq_acc += batch_seq_acc * n_pairs
+                val_token_acc += batch_token_acc * n_pairs
+                val_total += n_pairs
+
+        avg_val_loss = val_loss / val_total
+        avg_val_seq_acc = val_seq_acc / val_total
+        avg_val_token_acc = val_token_acc / val_total
+
+        # ---------------------
+        # Logging
+        # ---------------------
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f'\nEpoch [{epoch+1}/{num_epochs}]')
+        print(f'  Train Loss: {avg_train_loss:.4f} | SeqAcc: {avg_train_seq_acc:.4f} | TokAcc: {avg_train_token_acc:.4f}')
+        print(f'  Val   Loss: {avg_val_loss:.4f} | SeqAcc: {avg_val_seq_acc:.4f} | TokAcc: {avg_val_token_acc:.4f}')
+        print(f'  LR: {current_lr:.2e}\n')
+
+        writer.add_scalar('Loss/Train', avg_train_loss, epoch)
+        writer.add_scalar('SeqAcc/Train', avg_train_seq_acc, epoch)
+        writer.add_scalar('TokAcc/Train', avg_train_token_acc, epoch)
+        writer.add_scalar('Loss/Val', avg_val_loss, epoch)
+        writer.add_scalar('SeqAcc/Val', avg_val_seq_acc, epoch)
+        writer.add_scalar('TokAcc/Val', avg_val_token_acc, epoch)
+        writer.add_scalar('Learning Rate', current_lr, epoch)
+
+        if (epoch + 1) % checkpoint_interval == 0:
+            save_checkpoint(model, optimizer, scheduler, epoch + 1, config)
+
+    writer.close()
+    print("Training finished.")

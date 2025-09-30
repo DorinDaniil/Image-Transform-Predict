@@ -4,36 +4,23 @@ from omegaconf import DictConfig
 from typing import Optional, Tuple
 from .encoder import ImagePairEncoder
 from .decoder import TransformDecoder
-from .tokenizer import START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID
-
 
 class ImageTransformPredictor(nn.Module):
     """
     Complete end-to-end model for predicting image transformation sequences from image pairs.
-
-    Architecture:
-        1. ImagePairEncoder: Extracts fused features from two images using EfficientNet-B3
-        2. TransformDecoder: Autoregressively generates sequence of transformation tokens
-
-    Input:
-        - image_batch_1, image_batch_2: [B, 3, 224, 224]
-        - idx: [B, L] — full token sequence including START (e.g., [START, A, B, END, PAD, ...])
-
-    Special Tokens:
-        [PAD] = 0, [START] = 1, [END] = 2
-
-    Usage:
-        config = OmegaConf.load("config.yaml")
-        model = ImageTransformPredictor(config.model)
-        logits, loss = model(img1, img2, idx=full_sequence)  # training
-        generated = model.generate(img1, img2)               # inference
     """
-
     def __init__(self, config: DictConfig):
         super().__init__()
         self.config = config
         self.image_pair_encoder = ImagePairEncoder(config.encoder)
-        self.transform_decoder = TransformDecoder(config.decoder)
+
+        self.bos_token_id = config.decoder.bos_token_id
+        self.eos_token_id = config.decoder.eos_token_id
+        self.pad_token_id = config.decoder.pad_token_id
+
+        self.transform_decoder = TransformDecoder(
+            config.decoder
+        )
 
     def forward(
         self,
@@ -42,32 +29,16 @@ class ImageTransformPredictor(nn.Module):
         idx: torch.LongTensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Forward pass. Automatically constructs targets from idx for loss computation.
-
-        Args:
-            image_batch_1: [B, 3, 224, 224] — source image
-            image_batch_2: [B, 3, 224, 224] — target image
-            idx: [B, L] — full input sequence including START token.
-                 Example: [START, A, B, END, PAD, PAD]
-
-        Returns:
-            logits: [B, L, vocab_size] — predictions for next token at each position
-            loss: scalar tensor (or None if in eval mode and no targets needed)
+        Forward pass.
         """
-        # Encode image pair
         combined_embedding = self.image_pair_encoder(image_batch_1, image_batch_2)
-
-        # Construct targets: shift idx left by 1, pad last position
         targets = torch.roll(idx, shifts=-1, dims=1)
-        targets[:, -1] = PAD_TOKEN_ID  # no next token after last --> PAD
-
-        # Forward through decoder
+        targets[:, -1] = self.pad_token_id
         logits, loss = self.transform_decoder(
             idx=idx,
             combined_embedding=combined_embedding,
             targets=targets
         )
-
         return logits, loss
 
     @torch.no_grad()
@@ -78,10 +49,21 @@ class ImageTransformPredictor(nn.Module):
         max_new_tokens: Optional[int] = None,
         temperature: float = 1.0,
         top_k: Optional[int] = None,
+        do_sample: bool = False,
+        pad_token_id: int = None,
+        bos_token_id: int = None,
+        eos_token_id: int = None,
     ) -> torch.LongTensor:
         """Autoregressive generation."""
         if max_new_tokens is None:
             max_new_tokens = self.config.decoder.max_seq_len - 1
+
+        if pad_token_id is None:
+            pad_token_id = self.pad_token_id
+        if bos_token_id is None:
+            bos_token_id = self.bos_token_id
+        if eos_token_id is None:
+            eos_token_id = self.eos_token_id
 
         combined_embedding = self.image_pair_encoder(image_batch_1, image_batch_2)
         return self.transform_decoder.generate(
@@ -89,4 +71,8 @@ class ImageTransformPredictor(nn.Module):
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_k=top_k,
+            do_sample=do_sample,
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id
         )
