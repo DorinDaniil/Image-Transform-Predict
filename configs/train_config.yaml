@@ -1,6 +1,6 @@
 training:
   start_epoch: 0
-  resume: False
+  resume: True
   num_epochs: 50
   batch_size: 8
   device: 'cuda:1'

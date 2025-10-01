@@ -1,42 +1,29 @@
 import random
+import numpy as np
 from typing import List, Tuple
 from PIL import Image, ImageOps
 import torchvision.transforms as transforms
 from torchvision.transforms import functional
 
 class ImageTransformer:
-    """
-    A class to apply random sequences of image transformations.
-    Each transformation is sampled with a given probability, and rotations are mutually exclusive.
-    """
     transform_tokens = {
-        "noop": 3,            # Identity transformation (no change)
-        "grayscale": 4,       # Convert to grayscale
-        "rotate_90": 5,       # Rotate 90 degrees clockwise
-        "rotate_180": 6,      # Rotate 180 degrees
-        "rotate_270": 7,      # Rotate 270 degrees clockwise
-        "color_jitter": 8,    # Randomly adjust color
-        "noise_adding": 9,    # Add random noise
-        "crop": 10,           # Random crop (non-central)
-        "horizontal_flip": 11, # Flip horizontally
-        "vertical_flip": 12,  # Flip vertically
-        "resize": 13,         # Random resize
+        "noop": 3,
+        "grayscale": 4,
+        "rotate_90": 5,
+        "rotate_180": 6,
+        "rotate_270": 7,
+        "color_jitter": 8,
+        "noise_adding": 9,
+        "crop": 10,
+        "horizontal_flip": 11,
+        "vertical_flip": 12,
+        "resize": 13,
     }
 
     def __init__(self):
-        """
-        Initialize the transformer.
-        """
         self.transformations = list(self.transform_tokens.keys())
 
     def resize(self, image: Image.Image) -> Image.Image:
-        """
-        Resize the image randomly, either uniformly or with different scales for width and height.
-        Args:
-            image (Image.Image): Input image.
-        Returns:
-            Image.Image: Resized image.
-        """
         if random.random() > 0.5:
             scale = random.uniform(0.3, 2)
             w, h = image.size
@@ -49,16 +36,6 @@ class ImageTransformer:
         return image.resize((new_w, new_h))
 
     def crop(self, image: Image.Image, min_percent: int = 3, max_percent: int = 10):
-        """
-        Randomly crop the image, with the crop size as a percentage of the original size.
-        The crop is not necessarily central.
-        Args:
-            image (Image.Image): Input image.
-            min_percent (float): Minimum crop percent of the original size (default: 1).
-            max_percent (float): Maximum crop percent of the original size (default: 7).
-        Returns:
-            Image.Image: Cropped image.
-        """
         size = random.uniform(min_percent, max_percent)
         w, h = image.size
         left = random.randint(0, int(w * size / 100))
@@ -67,18 +44,26 @@ class ImageTransformer:
         height = random.randint(int(h * (1 - size / 100) - top), int(h - top - 1))
         return functional.crop(image, top=top, left=left, height=height, width=width)
 
+    import numpy as np
+
+    def is_grayscale(self, image: Image.Image) -> bool:
+        if image.mode in ("L", "LA", "P"):
+            return True
+
+        img_array = np.array(image)
+
+        if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+            return np.allclose(img_array[:, :, 0], img_array[:, :, 1]) and \
+                np.allclose(img_array[:, :, 1], img_array[:, :, 2])
+
+        return False
+
     def apply_transform(self, image: Image.Image, transform: str) -> Image.Image:
-        """
-        Apply a single transformation to the image.
-        Args:
-            image (Image.Image): Input image.
-            transform (str): Name of the transformation to apply.
-        Returns:
-            Image.Image: Transformed image.
-        """
         if transform == "noop":
             return image
         elif transform == "grayscale":
+            if self.is_grayscale(image):
+                return image  # Do not use grayscale if the image is already black and white
             return ImageOps.grayscale(image)
         elif transform == "rotate_90":
             return image.rotate(90, expand=True)
@@ -102,19 +87,17 @@ class ImageTransformer:
         else:
             return image
 
-    def sample_transformations(self, p: float = 0.4) -> List[str]:
-        """
-        Sample a random sequence of transformations, ensuring rotations are mutually exclusive.
-        Args:
-            p (float): Probability of selecting each transformation (default: 0.4).
-        Returns:
-            List[str]: List of selected transformations.
-        """
+    def sample_transformations(self, image: Image.Image, p: float = 0.4) -> List[str]:
         selected = []
         rotations = ["rotate_90", "rotate_180", "rotate_270"]
         rotation_chosen = False
+
+        is_gray = self.is_grayscale(image)
+
         for transform in self.transformations:
             if transform == "noop":
+                continue
+            if transform == "grayscale" and is_gray:
                 continue
             if transform in rotations:
                 if not rotation_chosen and random.random() < p:
@@ -123,17 +106,11 @@ class ImageTransformer:
             else:
                 if random.random() < p:
                     selected.append(transform)
+
         return selected if selected else ["noop"]
 
     def transform(self, image: Image.Image) -> Tuple[Image.Image, List[str]]:
-        """
-        Apply a random sequence of transformations to the image.
-        Args:
-            image (Image.Image): Input image.
-        Returns:
-            Tuple[Image.Image, List[str]]: Transformed image and the sequence of applied transformations.
-        """
-        sequence = self.sample_transformations()
+        sequence = self.sample_transformations(image)
         transformed_image = image.copy()
         for transform in sequence:
             transformed_image = self.apply_transform(transformed_image, transform)
