@@ -22,16 +22,29 @@ class ImageTransformPredictor(nn.Module):
             config.decoder
         )
 
+    def extract_image_embeddings(self, image_batch_1, image_batch_2):
+        """
+        Extract embeddings for two batches of images.
+        Args:
+            image_batch_1 (torch.Tensor): First batch of images with shape [batch_size, 3, 224, 224].
+            image_batch_2 (torch.Tensor): Second batch of images with shape [batch_size, 3, 224, 224].
+        Returns:
+            tuple: (features_1, features_2) — two batches of embeddings.
+        """
+        return self.image_pair_encoder.extract_image_embeddings(image_batch_1, image_batch_2)
+
     def forward(
         self,
         image_batch_1: torch.Tensor,
         image_batch_2: torch.Tensor,
         idx: torch.LongTensor,
+        use_precomputed_embeddings: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass.
         """
-        combined_embedding = self.image_pair_encoder(image_batch_1, image_batch_2)
+        combined_embedding = self.image_pair_encoder(image_batch_1, image_batch_2, use_precomputed_embeddings)
+
         targets = torch.roll(idx, shifts=-1, dims=1)
         targets[:, -1] = self.pad_token_id
         logits, loss = self.transform_decoder(

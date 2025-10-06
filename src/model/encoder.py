@@ -7,24 +7,30 @@ from omegaconf import DictConfig
 
 class ImageEncoder(nn.Module):
     """
-    EfficientNet-B3 based image encoder that returns 1536-dimensional feature embeddings.
+    EfficientNet-B3 based image encoder that returns feature embeddings,
+    optionally projected to a specified dimension.
 
     This encoder uses a pretrained EfficientNet-B3 model with the final classification layers removed.
     It includes built-in preprocessing for input images.
 
     Attributes:
         preprocess (transforms.Compose): Standard preprocessing pipeline for EfficientNet.
-        feature_dim (int): Dimension of the output feature embeddings (1536 for EfficientNet-B3).
+        feature_dim (int): Dimension of the output feature embeddings.
 
     Example:
-        >>> encoder = EfficientNetB3Encoder(freeze=True)
+        >>> encoder = ImageEncoder(encoder_emb_dim=768, freeze=True)
         >>> image_tensor = encoder.preprocess(pil_image)
-        >>> features = encoder(image_tensor.unsqueeze(0))
+        >>> features = encoder(image_tensor.unsqueeze(0))  # shape: [1, 768]
+
+        >>> encoder = ImageEncoder(encoder_emb_dim=None)  # uses original 1536-dim features
     """
 
-    def __init__(self, freeze=True):
+    def __init__(self, encoder_emb_dim=None, freeze=True):
         """
         Args:
+            encoder_emb_dim (int or None): Target dimension for output embeddings.
+                                           If None, uses original EfficientNet-B3 output (1536).
+                                           If int, adds a projection layer to that dimension.
             freeze (bool): If True, freezes all backbone weights. Defaults to True.
         """
         super().__init__()
@@ -36,7 +42,15 @@ class ImageEncoder(nn.Module):
 
         # Set layer trainability
         self._set_trainable(freeze)
-        self.feature_dim = 1536  # Output feature dimension for EfficientNet-B3
+
+        self.original_feature_dim = 1536
+        self.feature_dim = encoder_emb_dim if encoder_emb_dim is not None else self.original_feature_dim
+
+        # Add projection layer only if a target dimension is specified and different from original
+        if encoder_emb_dim is not None and encoder_emb_dim != self.original_feature_dim:
+            self.projection = nn.Linear(self.original_feature_dim, encoder_emb_dim)
+        else:
+            self.projection = nn.Identity()
 
         # Built-in preprocessing pipeline
         self.preprocess = transforms.Compose([
@@ -50,31 +64,6 @@ class ImageEncoder(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad = not freeze
 
-    def unfreeze_last_layers(self, n_layers=3):
-        """
-        Unfreeze the last N layers of the backbone for fine-tuning.
-
-        Args:
-            n_layers (int): Number of last layers to unfreeze. Defaults to 3.
-        """
-        # Freeze all layers first
-        self._set_trainable(freeze=True)
-
-        # Unfreeze final head layers
-        for param in self.backbone._conv_head.parameters():
-            param.requires_grad = True
-        for param in self.backbone._bn1.parameters():
-            param.requires_grad = True
-        n_layers -= 1  # Count head as 1 layer
-
-        # Unfreeze last MBConv blocks
-        total_blocks = len(self.backbone._blocks)
-        blocks_to_unfreeze = min(n_layers, total_blocks)
-
-        for i in range(total_blocks - blocks_to_unfreeze, total_blocks):
-            for param in self.backbone._blocks[i].parameters():
-                param.requires_grad = True
-
     def forward(self, x):
         """
         Forward pass through the encoder.
@@ -83,33 +72,50 @@ class ImageEncoder(nn.Module):
             x (torch.Tensor): Input tensor of shape [batch_size, 3, 224, 224]
 
         Returns:
-            torch.Tensor: Feature embeddings of shape [batch_size, 1536]
+            torch.Tensor: Feature embeddings of shape [batch_size, feature_dim]
         """
-        return self.backbone(x)
+        features = self.backbone(x)  # [batch_size, 1536]
+        projected = self.projection(features)
+        return projected
 
 
 class ImagePairEncoder(nn.Module):
     """
     Encoder for computing similarity features between two sets of images.
     If `use_precomputed_embeddings` is True, expects precomputed embeddings as input.
+
+    Behavior controlled by config:
+        - use_fuser: if True, applies linear projection after concatenation.
+                     if False, returns raw concatenated embeddings.
     """
     def __init__(self, config: DictConfig):
         super().__init__()
         self.config = config
-        self.image_encoder = ImageEncoder(freeze=config.freeze_image_encoder)
-        if config.unfreeze_n_layers is not None:
-            self.image_encoder.unfreeze_last_layers(config.unfreeze_n_layers)
-        self.fuser = nn.Linear(self.image_encoder.feature_dim * 2, config.embedding_dim)
+
+        # Initialize image encoder
+        self.image_encoder = ImageEncoder(
+            encoder_emb_dim=config.encoder_emb_dim,
+            freeze=config.freeze_image_encoder
+        )
+
+        # Read fuser flag directly from config (required)
+        self.use_fuser = config.use_fuser
+
+        feature_dim = self.image_encoder.feature_dim
+        concat_dim = feature_dim * 2
+
+        if self.use_fuser:
+            # Ensure combined_emb_dim is provided in config when fuser is used
+            if not hasattr(config, 'combined_emb_dim'):
+                raise ValueError("Config must contain 'combined_emb_dim' when use_fuser=True")
+            self.fuser = nn.Linear(concat_dim, config.combined_emb_dim)
+            self.output_dim = config.combined_emb_dim
+        else:
+            self.fuser = None
+            self.output_dim = concat_dim
 
     def extract_image_embeddings(self, image_batch_1, image_batch_2):
-        """
-        Extract embeddings for two batches of images.
-        Args:
-            image_batch_1 (torch.Tensor): First batch of images with shape [batch_size, 3, 224, 224].
-            image_batch_2 (torch.Tensor): Second batch of images with shape [batch_size, 3, 224, 224].
-        Returns:
-            tuple: (features_1, features_2) — two batches of embeddings.
-        """
+        """Extract embeddings for two image batches."""
         features_1 = self.image_encoder(image_batch_1)
         features_2 = self.image_encoder(image_batch_2)
         return features_1, features_2
@@ -117,16 +123,22 @@ class ImagePairEncoder(nn.Module):
     def forward(self, image_batch_1, image_batch_2, use_precomputed_embeddings=False):
         """
         Args:
-            image_batch_1 (torch.Tensor): First batch of images or precomputed embeddings.
-            image_batch_2 (torch.Tensor): Second batch of images or precomputed embeddings.
-            use_precomputed_embeddings (bool): If True, inputs are precomputed embeddings. Defaults to False.
+            image_batch_1, image_batch_2: either raw images [B, 3, 224, 224] or precomputed embeddings [B, D]
+            use_precomputed_embeddings: whether inputs are already embeddings
+
         Returns:
-            torch.Tensor: Fused embeddings for pairs with shape [batch_size, embedding_dim].
+            torch.Tensor: [B, output_dim]
+                - If use_fuser=True: [B, combined_emb_dim]
+                - If use_fuser=False: [B, 2 * encoder_emb_dim]
         """
         if not use_precomputed_embeddings:
             features_1, features_2 = self.extract_image_embeddings(image_batch_1, image_batch_2)
         else:
             features_1, features_2 = image_batch_1, image_batch_2
 
-        concatenated_features = torch.cat([features_1, features_2], dim=1)
-        return self.fuser(concatenated_features)
+        concatenated = torch.cat([features_1, features_2], dim=1)
+
+        if self.use_fuser:
+            return self.fuser(concatenated)
+        else:
+            return concatenated

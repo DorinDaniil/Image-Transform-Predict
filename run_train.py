@@ -7,7 +7,7 @@ from src.train import train_model
 from omegaconf import OmegaConf
 
 def main(data_path):
-    config_path = "configs/train_config.yaml"
+    config_path = "configs/train_config_006.yaml"
     train_config = OmegaConf.load(config_path)
 
     model = ImageTransformPredictor(train_config.model)
@@ -19,7 +19,7 @@ def main(data_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train Image Transform Predictor.')
-    parser.add_argument('--data_path', type=str, default="/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/src/data", help='Full path to the dataset directory')
+    parser.add_argument('--data_path', type=str, default="/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/data", help='Full path to the dataset directory')
     args = parser.parse_args()
 
     main(args.data_path)

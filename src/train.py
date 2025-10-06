@@ -173,11 +173,11 @@ def train_model(model, train_loader, val_loader, config):
             idx_batch = idx_batch.to(device)        # [B, max_seq_len]
 
             optimizer.zero_grad()
-
+            # --- 0. Create all B image features ---
+            orig_batch_features, aug_batch_features =  model.extract_image_embeddings(orig_batch, aug_batch)
             # --- 1. Create all B x B image pairs ---
-            B, C, H, W = orig_batch.shape
-            orig_all = orig_batch.unsqueeze(1).expand(B, B, C, H, W).reshape(B * B, C, H, W)
-            aug_all = aug_batch.unsqueeze(0).expand(B, B, C, H, W).reshape(B * B, C, H, W)
+            orig_all_features = orig_batch_features.unsqueeze(1).expand(B, B, -1).reshape(B * B, -1)
+            aug_all_features = aug_batch_features.unsqueeze(0).expand(B, B, -1).reshape(B * B, -1)
 
             # --- 2. Build full_idx for all pairs ---
             pos_idx = idx_batch  # [B, max_seq_len]
@@ -201,9 +201,10 @@ def train_model(model, train_loader, val_loader, config):
 
             # --- 3. Forward pass ---
             logits, loss = model(
-                orig_all,
-                aug_all,
-                full_idx
+                orig_all_features,
+                aug_all_features,
+                full_idx,
+                use_precomputed_embeddings=True
             )
 
             loss.backward()
@@ -242,9 +243,10 @@ def train_model(model, train_loader, val_loader, config):
                 idx_batch = idx_batch.to(device)
 
                 # --- Create all B x B image pairs ---
-                B, C, H, W = orig_batch.shape
-                orig_all = orig_batch.unsqueeze(1).expand(B, B, C, H, W).reshape(B * B, C, H, W)
-                aug_all = aug_batch.unsqueeze(0).expand(B, B, C, H, W).reshape(B * B, C, H, W)
+                orig_batch_features, aug_batch_features = model.extract_image_embeddings(orig_batch, aug_batch)
+
+                orig_all_features = orig_batch_features.unsqueeze(1).expand(B, B, -1).reshape(B * B, -1)
+                aug_all_features = aug_batch_features.unsqueeze(0).expand(B, B, -1).reshape(B * B, -1)
 
                 pos_idx = idx_batch
                 neg_idx = create_negative_idx(
@@ -267,9 +269,10 @@ def train_model(model, train_loader, val_loader, config):
 
 
                 logits, loss = model(
-                    orig_all,
-                    aug_all,
-                    full_idx
+                    orig_all_features,
+                    aug_all_features,
+                    full_idx,
+                    use_precomputed_embeddings=True
                 )
 
                 batch_seq_acc = compute_sequence_accuracy(logits, full_targets, pad_token_id)

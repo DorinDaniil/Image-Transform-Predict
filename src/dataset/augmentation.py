@@ -1,26 +1,28 @@
 import random
 import numpy as np
+import io
+import torchvision.transforms as transforms
 from typing import List, Tuple
 from PIL import Image, ImageOps
-import torchvision.transforms as transforms
 from torchvision.transforms import functional
 
 class ImageTransformer:
-    transform_tokens = {
-        "noop": 3,
-        "grayscale": 4,
-        "rotate_90": 5,
-        "rotate_180": 6,
-        "rotate_270": 7,
-        "color_jitter": 8,
-        "noise_adding": 9,
-        "crop": 10,
-        "horizontal_flip": 11,
-        "vertical_flip": 12,
-        "resize": 13,
-    }
 
     def __init__(self):
+        self.transform_tokens = {
+            "noop": 3,
+            "grayscale": 4,
+            "rotate_90": 5,
+            "rotate_180": 6,
+            "rotate_270": 7,
+            "color_jitter": 8,
+            "noise_adding": 9,
+            "crop": 10,
+            "horizontal_flip": 11,
+            "vertical_flip": 12,
+            # "resize": 13,
+            # "jpeg_artefacts": 14,
+        }
         self.transformations = list(self.transform_tokens.keys())
 
     def resize(self, image: Image.Image) -> Image.Image:
@@ -35,7 +37,7 @@ class ImageTransformer:
             new_w, new_h = int(w * scale_w), int(h * scale_h)
         return image.resize((new_w, new_h))
 
-    def crop(self, image: Image.Image, min_percent: int = 3, max_percent: int = 10):
+    def crop(self, image: Image.Image, min_percent: int = 3, max_percent: int = 15):
         size = random.uniform(min_percent, max_percent)
         w, h = image.size
         left = random.randint(0, int(w * size / 100))
@@ -44,26 +46,37 @@ class ImageTransformer:
         height = random.randint(int(h * (1 - size / 100) - top), int(h - top - 1))
         return functional.crop(image, top=top, left=left, height=height, width=width)
 
-    import numpy as np
-
     def is_grayscale(self, image: Image.Image) -> bool:
         if image.mode in ("L", "LA", "P"):
             return True
-
         img_array = np.array(image)
-
         if len(img_array.shape) == 3 and img_array.shape[2] == 3:
             return np.allclose(img_array[:, :, 0], img_array[:, :, 1]) and \
                 np.allclose(img_array[:, :, 1], img_array[:, :, 2])
-
         return False
+
+    def noise_adding(self, image: Image.Image) -> Image.Image:
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        img_np = np.array(image).astype(np.float32)
+        mean = 0
+        sigma = random.uniform(5, 20)
+        gaussian = np.random.normal(mean, sigma, img_np.shape)
+        noisy = img_np + gaussian
+        noisy = np.clip(noisy, 0, 255).astype(np.uint8)
+        return Image.fromarray(noisy, 'RGB')
+
+    def jpeg_artefacts(self, image: Image.Image) -> Image.Image:
+        buffer = io.BytesIO()
+        quality = random.randint(30, 70)
+        image.save(buffer, format='JPEG', quality=quality, optimize=True)
+        buffer.seek(0)
+        return Image.open(buffer).convert('RGB')
 
     def apply_transform(self, image: Image.Image, transform: str) -> Image.Image:
         if transform == "noop":
             return image
         elif transform == "grayscale":
-            if self.is_grayscale(image):
-                return image  # Do not use grayscale if the image is already black and white
             return ImageOps.grayscale(image)
         elif transform == "rotate_90":
             return image.rotate(90, expand=True)
@@ -75,7 +88,9 @@ class ImageTransformer:
             enhancer = transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.3)
             return enhancer(image)
         elif transform == "noise_adding":
-            return image.point(lambda p: p * random.uniform(0.9, 1.1))
+            return self.noise_adding(image)
+        elif transform == "jpeg_artefacts":
+            return self.jpeg_artefacts(image)
         elif transform == "crop":
             return self.crop(image)
         elif transform == "horizontal_flip":
@@ -87,31 +102,46 @@ class ImageTransformer:
         else:
             return image
 
-    def sample_transformations(self, image: Image.Image, p: float = 0.4) -> List[str]:
-        selected = []
-        rotations = ["rotate_90", "rotate_180", "rotate_270"]
-        rotation_chosen = False
-
+    def sample_transformations(self, image: Image.Image, p: float = 0.3) -> List[str]:
         is_gray = self.is_grayscale(image)
+        transforms_to_sample = [t for t in self.transformations if t != "noop"]
+        random.shuffle(transforms_to_sample)
 
-        for transform in self.transformations:
-            if transform == "noop":
+        selected = []
+        flags = {"r180": False, "h": False, "v": False}
+        rot_selected = False
+
+        for t in transforms_to_sample:
+            if t == "grayscale" and is_gray:
                 continue
-            if transform == "grayscale" and is_gray:
+            if random.random() >= p:
                 continue
-            if transform in rotations:
-                if not rotation_chosen and random.random() < p:
-                    selected.append(transform)
-                    rotation_chosen = True
+
+            if t in ("rotate_90", "rotate_270"):
+                if not rot_selected:
+                    selected.append(t)
+                    rot_selected = True
+            elif t == "rotate_180":
+                if not rot_selected and not (flags["h"] and flags["v"]):
+                    selected.append(t)
+                    flags["r180"] = True
+                    rot_selected = True
+            elif t == "horizontal_flip":
+                if not (flags["r180"] and flags["v"]):
+                    selected.append(t)
+                    flags["h"] = True
+            elif t == "vertical_flip":
+                if not (flags["r180"] and flags["h"]):
+                    selected.append(t)
+                    flags["v"] = True
             else:
-                if random.random() < p:
-                    selected.append(transform)
+                selected.append(t)
 
         return selected if selected else ["noop"]
 
-    def transform(self, image: Image.Image) -> Tuple[Image.Image, List[str]]:
-        sequence = self.sample_transformations(image)
+    def transform(self, image: Image.Image, p: float = 0.3) -> Tuple[Image.Image, List[str]]:
+        sequence = self.sample_transformations(image, p)
         transformed_image = image.copy()
         for transform in sequence:
             transformed_image = self.apply_transform(transformed_image, transform)
-        return transformed_image, sequence
+        return transformed_image.convert('RGB'), sequence
