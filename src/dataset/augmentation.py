@@ -139,7 +139,7 @@ class ImageTransformer:
 
         return selected if selected else ["noop"]
 
-    def transform(self, image: Image.Image, p: float = 0.3) -> Tuple[Image.Image, List[str]]:
+    def transform(self, image: Image.Image, p: float = 0.5) -> Tuple[Image.Image, List[str]]:
         sequence = self.sample_transformations(image, p)
         transformed_image = image.copy()
         for transform in sequence:
