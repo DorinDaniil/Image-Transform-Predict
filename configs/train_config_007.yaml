@@ -1,0 +1,47 @@
+training:
+  start_epoch: 0
+  resume: False
+  num_epochs: 50
+  batch_size: 32
+  device: 'cuda:2'
+  checkpoint_interval: 1
+  checkpoint_dir: '/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/checkpoints/itp_007'
+
+data:
+  tensorboard_logdir: '/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/logs/itp_007'
+
+model:
+  model_name: 'itp_007'
+  initialization_weights_path: null
+  encoder:
+    encoder_emb_dim: null
+    freeze_image_encoder: False
+    combined_emb_dim: 512
+    use_fuser: True
+  decoder:
+    n_embd: 512
+    n_hidden_state: 2048
+    n_head: 8
+    n_layer: 3
+    max_seq_len: 15
+    dropout: 0.1
+    bias: False
+    bos_token_id: 1
+    eos_token_id: 2
+    pad_token_id: 0
+    vocab_size: 16
+
+optimizer:
+  name: 'AdamW'
+  lr: 0.001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+
+scheduler:
+  milestones: [10, 20, 30, 40]
+  gamma: 0.5
+
+augmentation:
+  initial_p: 0.1
+  milestones: [1, 2, 3, 4, 5, 6, 7, 8]
+  probs: [0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]

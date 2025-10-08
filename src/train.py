@@ -84,14 +84,16 @@ def get_scheduler(opt, config):
     return sched
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, config):
-    """Save model checkpoint. Creates checkpoint directory if it does not exist."""
+def save_checkpoint(model, optimizer, scheduler, epoch, config, augmentation_scheduler=None):
+    """Save model checkpoint."""
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict()
     }
+    if augmentation_scheduler is not None:
+        checkpoint['augmentation_scheduler_state_dict'] = augmentation_scheduler.state_dict()
 
     checkpoint_dir = config['training']['checkpoint_dir']
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -101,7 +103,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, config):
     print(f'Checkpoint saved at epoch {epoch}')
 
 
-def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
+def load_checkpoint(model, optimizer, scheduler, checkpoint_path, augmentation_scheduler=None):
     """Load model checkpoint if exists."""
     if os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -109,6 +111,8 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         epoch = checkpoint['epoch']
+        if augmentation_scheduler is not None and 'augmentation_scheduler_state_dict' in checkpoint:
+            augmentation_scheduler.load_state_dict(checkpoint['augmentation_scheduler_state_dict'])
         print(f'Checkpoint loaded from epoch {epoch}')
         return epoch
     else:
@@ -120,17 +124,20 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
 # Main Training Loop
 # ======================
 
-def train_model(model, train_loader, val_loader, config):
+def train_model(model, train_loader, val_loader, config, augmentation_scheduler):
     """
-    Train the transformer decoder model with contrastive-like negative sampling.
+    Train the model using the provided augmentation scheduler (shared with dataset).
     
-    Each batch of size B is expanded to B x B pairs:
-      - Diagonal (i == j): positive pairs with real transformation sequences.
-      - Off-diagonal (i != j): negative pairs with [START, END, PAD, ...] sequences.
+    Args:
+        model: Your model.
+        train_loader, val_loader: Data loaders (dataset must use the same augmentation_scheduler).
+        config: Training config.
+        augmentation_scheduler: Shared AugmentationScheduler instance.
     """
     optimizer = get_optimizer(model, config)
-    scheduler = get_scheduler(optimizer, config)
+    lr_scheduler = get_scheduler(optimizer, config)
 
+    # === Training setup ===
     num_epochs = config['training']['num_epochs']
     device = torch.device(config['training']['device'])
     checkpoint_interval = config['training']['checkpoint_interval']
@@ -142,13 +149,12 @@ def train_model(model, train_loader, val_loader, config):
 
     model.to(device)
 
-    # Token IDs and max sequence length from model.decoder config
     pad_token_id = config.model.decoder.pad_token_id
-    start_token_id = config.model.decoder.bos_token_id  # [START]
-    end_token_id = config.model.decoder.eos_token_id    # [END]
+    start_token_id = config.model.decoder.bos_token_id
+    end_token_id = config.model.decoder.eos_token_id
     max_seq_len = config.model.decoder.max_seq_len
 
-    # Resume from checkpoint if needed
+    # === Resume ===
     start_epoch = 0
     if config['training']['resume']:
         checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pth')]
@@ -157,9 +163,15 @@ def train_model(model, train_loader, val_loader, config):
                 [os.path.join(checkpoint_dir, f) for f in checkpoints],
                 key=os.path.getctime
             )
-            start_epoch = load_checkpoint(model, optimizer, scheduler, latest_checkpoint)
+            start_epoch = load_checkpoint(model, optimizer, lr_scheduler, latest_checkpoint, augmentation_scheduler)
 
+    # === Training loop ===
     for epoch in range(start_epoch, num_epochs):
+        # Update augmentation probability
+        augmentation_scheduler.step()
+        current_aug_p = augmentation_scheduler.p
+        print(f"[Augmentation] Epoch {epoch+1}: p = {current_aug_p:.3f}")
+
         model.train()
         train_loss = 0.0
         train_seq_acc = 0.0
@@ -168,26 +180,23 @@ def train_model(model, train_loader, val_loader, config):
 
         for orig_batch, aug_batch, idx_batch in tqdm(train_loader, desc=f"Train Epoch {epoch+1}"):
             B = orig_batch.size(0)
-            orig_batch = orig_batch.to(device)      # [B, C, H, W]
-            aug_batch = aug_batch.to(device)        # [B, C, H, W]
-            idx_batch = idx_batch.to(device)        # [B, max_seq_len]
+            orig_batch = orig_batch.to(device)
+            aug_batch = aug_batch.to(device)
+            idx_batch = idx_batch.to(device)
 
             optimizer.zero_grad()
-            # --- 0. Create all B image features ---
-            orig_batch_features, aug_batch_features =  model.extract_image_embeddings(orig_batch, aug_batch)
-            # --- 1. Create all B x B image pairs ---
+            orig_batch_features, aug_batch_features = model.extract_image_embeddings(orig_batch, aug_batch)
             orig_all_features = orig_batch_features.unsqueeze(1).expand(B, B, -1).reshape(B * B, -1)
             aug_all_features = aug_batch_features.unsqueeze(0).expand(B, B, -1).reshape(B * B, -1)
 
-            # --- 2. Build full_idx for all pairs ---
-            pos_idx = idx_batch  # [B, max_seq_len]
+            pos_idx = idx_batch
             neg_idx = create_negative_idx(
                 batch_size=B * (B - 1),
                 max_seq_len=max_seq_len,
                 start_token_id=start_token_id,
                 end_token_id=end_token_id,
                 pad_token_id=pad_token_id
-            ).to(device)  # [B*(B-1), max_seq_len]
+            ).to(device)
 
             full_idx = torch.zeros(B*B, max_seq_len, dtype=torch.long, device=device)
             diag_indices = torch.arange(B, device=device) * (B + 1)
@@ -199,7 +208,6 @@ def train_model(model, train_loader, val_loader, config):
             full_targets = torch.full_like(full_idx, pad_token_id)
             full_targets[:, :-1] = full_idx[:, 1:]
 
-            # --- 3. Forward pass ---
             logits, loss = model(
                 orig_all_features,
                 aug_all_features,
@@ -210,7 +218,6 @@ def train_model(model, train_loader, val_loader, config):
             loss.backward()
             optimizer.step()
 
-            # --- 4. Compute metrics ---
             batch_seq_acc = compute_sequence_accuracy(logits, full_targets, pad_token_id)
             batch_token_acc = compute_token_accuracy(logits, full_targets, pad_token_id)
 
@@ -220,15 +227,13 @@ def train_model(model, train_loader, val_loader, config):
             train_token_acc += batch_token_acc * n_pairs
             total_pairs += n_pairs
 
-        scheduler.step()
+        lr_scheduler.step()
 
         avg_train_loss = train_loss / total_pairs
         avg_train_seq_acc = train_seq_acc / total_pairs
         avg_train_token_acc = train_token_acc / total_pairs
 
-        # ---------------------
-        # Validation (currently uses teacher-forcing; replace with generate() for real eval)
-        # ---------------------
+        # === Validation ===
         model.eval()
         val_loss = 0.0
         val_seq_acc = 0.0
@@ -242,9 +247,7 @@ def train_model(model, train_loader, val_loader, config):
                 aug_batch = aug_batch.to(device)
                 idx_batch = idx_batch.to(device)
 
-                # --- Create all B x B image pairs ---
                 orig_batch_features, aug_batch_features = model.extract_image_embeddings(orig_batch, aug_batch)
-
                 orig_all_features = orig_batch_features.unsqueeze(1).expand(B, B, -1).reshape(B * B, -1)
                 aug_all_features = aug_batch_features.unsqueeze(0).expand(B, B, -1).reshape(B * B, -1)
 
@@ -267,7 +270,6 @@ def train_model(model, train_loader, val_loader, config):
                 full_targets = torch.full_like(full_idx, pad_token_id)
                 full_targets[:, :-1] = full_idx[:, 1:]
 
-
                 logits, loss = model(
                     orig_all_features,
                     aug_all_features,
@@ -288,9 +290,7 @@ def train_model(model, train_loader, val_loader, config):
         avg_val_seq_acc = val_seq_acc / val_total
         avg_val_token_acc = val_token_acc / val_total
 
-        # ---------------------
-        # Logging
-        # ---------------------
+        # === Logging ===
         current_lr = optimizer.param_groups[0]['lr']
         print(f'\nEpoch [{epoch+1}/{num_epochs}]')
         print(f'  Train Loss: {avg_train_loss:.4f} | SeqAcc: {avg_train_seq_acc:.4f} | TokAcc: {avg_train_token_acc:.4f}')
@@ -304,9 +304,10 @@ def train_model(model, train_loader, val_loader, config):
         writer.add_scalar('SeqAcc/Val', avg_val_seq_acc, epoch)
         writer.add_scalar('TokAcc/Val', avg_val_token_acc, epoch)
         writer.add_scalar('Learning Rate', current_lr, epoch)
+        writer.add_scalar('Augmentation/p', current_aug_p, epoch)
 
         if (epoch + 1) % checkpoint_interval == 0:
-            save_checkpoint(model, optimizer, scheduler, epoch + 1, config)
+            save_checkpoint(model, optimizer, lr_scheduler, epoch + 1, config, augmentation_scheduler)
 
     writer.close()
     print("Training finished.")

@@ -2,11 +2,86 @@ import random
 import numpy as np
 import io
 import torchvision.transforms as transforms
-from typing import List, Tuple
-from PIL import Image, ImageOps
+from typing import List, Tuple, Optional
+from PIL import Image, ImageOps, ImageFilter
 from torchvision.transforms import functional
 
+
+class AugmentationScheduler:
+    """
+    Controls augmentation probability p during training.
+    Interface and behavior match torch.optim.lr_scheduler.MultiStepLR.
+
+    Args:
+        initial_p (float): Initial probability (used before any milestone).
+        milestones (List[int]): Epoch indices (0-based) after which p changes.
+        probs (List[float]): New probabilities corresponding to each milestone.
+
+    Example:
+        # p = 0.1 for epochs 0-4 (first 5 epochs)
+        # p = 0.3 starting from epoch 5 (6th epoch in logs)
+        scheduler = AugmentationScheduler(
+            initial_p=0.1,
+            milestones=[5, 10],
+            probs=[0.3, 0.5]
+        )
+    """
+
+    def __init__(
+        self,
+        initial_p: float = 0.3,
+        milestones: Optional[List[int]] = None,
+        probs: Optional[List[float]] = None,
+    ):
+        self.initial_p = initial_p
+        self.milestones = milestones if milestones is not None else []
+        self.probs = probs if probs is not None else []
+
+        if len(self.milestones) != len(self.probs):
+            raise ValueError("milestones and probs must have the same length")
+        if not all(self.milestones[i] < self.milestones[i + 1] for i in range(len(self.milestones) - 1)):
+            raise ValueError("milestones must be increasing")
+
+        self.last_epoch = -1
+        self._current_p = initial_p
+
+    def step(self):
+        """Call once per epoch (no arguments)."""
+        self.last_epoch += 1
+        p = self.initial_p
+        for milestone, prob in zip(self.milestones, self.probs):
+            if self.last_epoch >= milestone:
+                p = prob
+            else:
+                break
+        self._current_p = p
+
+    @property
+    def p(self) -> float:
+        return self._current_p
+
+    def state_dict(self) -> dict:
+        return {
+            "initial_p": self.initial_p,
+            "milestones": self.milestones,
+            "probs": self.probs,
+            "last_epoch": self.last_epoch,
+            "_current_p": self._current_p,
+        }
+
+    def load_state_dict(self, state: dict):
+        self.initial_p = state["initial_p"]
+        self.milestones = state["milestones"]
+        self.probs = state["probs"]
+        self.last_epoch = state["last_epoch"]
+        self._current_p = state["_current_p"]
+
+
 class ImageTransformer:
+    """
+    Applies a sequence of image transformations and returns the transformed image
+    along with the list of applied transformation names.
+    """
 
     def __init__(self):
         self.transform_tokens = {
@@ -20,10 +95,16 @@ class ImageTransformer:
             "crop": 10,
             "horizontal_flip": 11,
             "vertical_flip": 12,
-            # "resize": 13,
-            # "jpeg_artefacts": 14,
+            "compression": 13,
+            "jpeg_artefacts": 14,
+            "blur": 15,
         }
         self.transformations = list(self.transform_tokens.keys())
+        self._current_p = 0.4  # default fallback
+
+    def set_p(self, p: float):
+        """Set the current augmentation probability."""
+        self._current_p = p
 
     def resize(self, image: Image.Image) -> Image.Image:
         if random.random() > 0.5:
@@ -68,10 +149,28 @@ class ImageTransformer:
 
     def jpeg_artefacts(self, image: Image.Image) -> Image.Image:
         buffer = io.BytesIO()
-        quality = random.randint(30, 70)
+        quality = random.randint(20, 70)
         image.save(buffer, format='JPEG', quality=quality, optimize=True)
         buffer.seek(0)
         return Image.open(buffer).convert('RGB')
+
+    def blur(self, image: Image.Image) -> Image.Image:
+        radius = random.uniform(1.0, 3.0)
+        return image.filter(ImageFilter.GaussianBlur(radius=radius))
+
+    def compression(self, image: Image.Image) -> Image.Image:
+        w, h = image.size
+        max_allowed = 223
+        if w <= max_allowed and h <= max_allowed:
+            scale = random.uniform(0.5, 0.95)
+            new_w = max(32, int(w * scale))
+            new_h = max(32, int(h * scale))
+        else:
+            scale = min(max_allowed / w, max_allowed / h)
+            scale *= random.uniform(0.7, 1.0)
+            new_w = max(32, int(w * scale))
+            new_h = max(32, int(h * scale))
+        return image.resize((new_w, new_h), Image.LANCZOS)
 
     def apply_transform(self, image: Image.Image, transform: str) -> Image.Image:
         if transform == "noop":
@@ -97,8 +196,10 @@ class ImageTransformer:
             return ImageOps.mirror(image)
         elif transform == "vertical_flip":
             return ImageOps.flip(image)
-        elif transform == "resize":
-            return self.resize(image)
+        elif transform == "compression":
+            return self.compression(image)
+        elif transform == "blur":
+            return self.blur(image)
         else:
             return image
 
@@ -108,8 +209,16 @@ class ImageTransformer:
         random.shuffle(transforms_to_sample)
 
         selected = []
-        flags = {"r180": False, "h": False, "v": False}
-        rot_selected = False
+        flags = {
+            "r180": False,
+            "h": False,
+            "v": False,
+            "rot": False,
+            "heavy_distortion": False,
+            "grayscale_selected": False,
+        }
+
+        heavy_distortions = {"blur", "jpeg_artefacts", "compression", "noise_adding"}
 
         for t in transforms_to_sample:
             if t == "grayscale" and is_gray:
@@ -117,30 +226,47 @@ class ImageTransformer:
             if random.random() >= p:
                 continue
 
-            if t in ("rotate_90", "rotate_270"):
-                if not rot_selected:
+            if t == "color_jitter":
+                if flags["grayscale_selected"]:
+                    continue
+                selected.append(t)
+                continue
+
+            if t in heavy_distortions:
+                if not flags["heavy_distortion"]:
                     selected.append(t)
-                    rot_selected = True
+                    flags["heavy_distortion"] = True
+                continue
+
+            if t in ("rotate_90", "rotate_270"):
+                if not flags["rot"]:
+                    selected.append(t)
+                    flags["rot"] = True
+
             elif t == "rotate_180":
-                if not rot_selected and not (flags["h"] and flags["v"]):
+                if not flags["rot"] and not (flags["h"] and flags["v"]):
                     selected.append(t)
                     flags["r180"] = True
-                    rot_selected = True
+                    flags["rot"] = True
+
             elif t == "horizontal_flip":
                 if not (flags["r180"] and flags["v"]):
                     selected.append(t)
                     flags["h"] = True
+
             elif t == "vertical_flip":
                 if not (flags["r180"] and flags["h"]):
                     selected.append(t)
                     flags["v"] = True
+
             else:
                 selected.append(t)
 
         return selected if selected else ["noop"]
 
-    def transform(self, image: Image.Image, p: float = 0.5) -> Tuple[Image.Image, List[str]]:
-        sequence = self.sample_transformations(image, p)
+    def transform(self, image: Image.Image, p: Optional[float] = None) -> Tuple[Image.Image, List[str]]:
+        actual_p = p if p is not None else self._current_p
+        sequence = self.sample_transformations(image, actual_p)
         transformed_image = image.copy()
         for transform in sequence:
             transformed_image = self.apply_transform(transformed_image, transform)

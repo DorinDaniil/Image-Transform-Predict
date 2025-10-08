@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 from .tokenizer import TransformTokenizer
-from .augmentation import ImageTransformer
+from .augmentation import ImageTransformer, AugmentationScheduler
 
 
 def _default_image_preprocessor() -> Callable[[Image.Image], torch.Tensor]:
@@ -39,18 +39,8 @@ class DomainNetDataset(Dataset):
         image_preprocessor: Optional[Callable[[Image.Image], torch.Tensor]] = None,
         random_seed: int = 42,
         max_seq_len: int = 15,
+        augmentation_scheduler: Optional[AugmentationScheduler] = None,
     ):
-        """
-        Args:
-            data_dir: Path to root with domain folders (e.g., 'real/', 'painting/', ...)
-            tokenizer: Your TransformTokenizer instance
-            transformer: Your ImageTransformer instance
-            split: 'train' or 'val'
-            val_size: Fraction of images FROM EACH DOMAIN for validation
-            image_preprocessor: Optional callable; if None, uses default
-            random_seed: Seed for reproducible per-domain splits
-            max_seq_len: Max sequence length for padding
-        """
         if split not in ("train", "val"):
             raise ValueError("split must be 'train' or 'val'!")
 
@@ -60,6 +50,7 @@ class DomainNetDataset(Dataset):
         self.transformer = transformer
         self.split = split
         self.max_seq_len = max_seq_len
+        self.augmentation_scheduler = augmentation_scheduler
 
         domain_to_paths: Dict[str, List[str]] = {}
         for domain in sorted(os.listdir(data_dir)):
@@ -95,7 +86,9 @@ class DomainNetDataset(Dataset):
         image_path = self.image_paths[idx]
         original_image = Image.open(image_path).convert("RGB")
 
-        transformed_image, transform_sequence = self.transformer.transform(original_image)
+        p = self.augmentation_scheduler.p if self.augmentation_scheduler is not None else None
+
+        transformed_image, transform_sequence = self.transformer.transform(original_image, p=p)
 
         original_tensor = self.preprocessor(original_image)
         transformed_tensor = self.preprocessor(transformed_image.convert("RGB"))
@@ -120,10 +113,8 @@ def get_domainnet_dataloaders(
     image_preprocessor: Optional[Callable[[Image.Image], torch.Tensor]] = None,
     random_seed: int = 42,
     max_seq_len: int = 15,
+    augmentation_scheduler: Optional[AugmentationScheduler] = None,
 ):
-    """
-    Returns train and validation dataloaders with per-domain stratification.
-    """
     common_kwargs = dict(
         data_dir=data_dir,
         tokenizer=tokenizer,
@@ -132,6 +123,7 @@ def get_domainnet_dataloaders(
         image_preprocessor=image_preprocessor,
         random_seed=random_seed,
         max_seq_len=max_seq_len,
+        augmentation_scheduler=augmentation_scheduler,
     )
 
     train_dataset = DomainNetDataset(split="train", **common_kwargs)
