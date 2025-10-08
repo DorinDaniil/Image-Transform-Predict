@@ -120,18 +120,34 @@ class RoPESelfAttention(nn.Module):
 
 
 # ---------- MLP ----------
+# in original paper hidden_dim = 2/3 * 4 * input_dim
+class SwiGLU(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, bias: bool = False):
+        super().__init__()
+        # gate_proj and up_proj: input_dim --> hidden_dim
+        self.gate_proj = nn.Linear(input_dim, hidden_dim, bias=bias)
+        self.up_proj = nn.Linear(input_dim, hidden_dim, bias=bias)
+        # down_proj: hidden_dim --> input_dim
+        self.down_proj = nn.Linear(hidden_dim, input_dim, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # SwiGLU(x) = silu(gate_proj(x)) * up_proj(x), then down_proj
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
 class MLP(nn.Module):
     def __init__(self, config: DictConfig):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(config.n_embd, config.n_hidden_state, bias=config.bias),
-            nn.GELU(),
-            nn.Linear(config.n_hidden_state, config.n_embd, bias=config.bias),
-            nn.Dropout(config.dropout),
+        self.swiglu = SwiGLU(
+            input_dim=config.n_embd,
+            hidden_dim=config.n_hidden_state,
+            bias=config.bias
         )
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        x = self.swiglu(x)
+        return self.dropout(x)
 
 
 class DecoderBlock(nn.Module):
@@ -152,7 +168,7 @@ class DecoderBlock(nn.Module):
 
 
 # ---------- Main Decoder with RoPE ----------
-class TransformDecoder(nn.Module):
+class TransformDecoderRope(nn.Module):
     def __init__(self, config: DictConfig):
         super().__init__()
         self.config = config
