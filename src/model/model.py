@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig
 from typing import Optional, Tuple
-from .encoder import ImagePairEncoder
+from .efficientnet_encoder import ImagePairEfficientNet
 from .decoder import TransformDecoder
+from .vit_encoder import ImagePairViT
 
 class ImageTransformPredictor(nn.Module):
     """
@@ -12,15 +13,18 @@ class ImageTransformPredictor(nn.Module):
     def __init__(self, config: DictConfig):
         super().__init__()
         self.config = config
-        self.image_pair_encoder = ImagePairEncoder(config.encoder)
+
+        encoder_type = config.encoder.get("type", "efficientnet")
+        if encoder_type == "vit":
+            self.image_pair_encoder = ImagePairViT(config.encoder)
+        else:
+            self.image_pair_encoder = ImagePairEfficientNet(config.encoder)
 
         self.bos_token_id = config.decoder.bos_token_id
         self.eos_token_id = config.decoder.eos_token_id
         self.pad_token_id = config.decoder.pad_token_id
-
-        self.transform_decoder = TransformDecoder(
-            config.decoder
-        )
+        
+        self.transform_decoder = TransformDecoder(config.decoder)
 
     def extract_image_embeddings(self, image_batch_1, image_batch_2):
         """

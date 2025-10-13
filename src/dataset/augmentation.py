@@ -95,12 +95,10 @@ class ImageTransformer:
             "crop": 10,
             "horizontal_flip": 11,
             "vertical_flip": 12,
-            "compression": 13,
-            "jpeg_artefacts": 14,
-            "blur": 15,
+            "jpeg_artefacts": 13,
         }
         self.transformations = list(self.transform_tokens.keys())
-        self._current_p = 0.4  # default fallback
+        self._current_p = 0.3  # default fallback
 
     def set_p(self, p: float):
         """Set the current augmentation probability."""
@@ -204,6 +202,28 @@ class ImageTransformer:
             return image
 
     def sample_transformations(self, image: Image.Image, p: float = 0.3) -> List[str]:
+        """Randomly sample a subset of augmentations to apply to the input image.
+
+        This method samples a combination of transformations while avoiding redundant or
+        self-canceling sequences (i.e., combinations equivalent to a noop). The goal is to
+        maintain a unique, non-degenerate mapping between the applied sequence and the
+        resulting image, while allowing the model to learn meaningful relationships and
+        compositional structure between transformations.
+
+        At most one rotation (90, 180, or 270 degrees) is selected per sample to avoid
+        overlapping orientation states. Both horizontal and vertical flips can be included
+        in the same sequence, as their combination is not excluded unless it directly leads
+        to a noop-equivalent transformation. Heavy distortions (e.g., JPEG artifacts, noise)
+        are limited to one per sequence. Grayscale conversion is skipped if the image is
+        already grayscale, and color jitter is omitted when grayscale is selected.
+
+        Args:
+            image: Input PIL image used to determine grayscale status.
+            p: Probability threshold for including each transformation (default: 0.3).
+
+        Returns:
+            List of selected transformation names, or ["noop"] if none are chosen.
+        """
         is_gray = self.is_grayscale(image)
         transforms_to_sample = [t for t in self.transformations if t != "noop"]
         random.shuffle(transforms_to_sample)
@@ -214,17 +234,20 @@ class ImageTransformer:
             "h": False,
             "v": False,
             "rot": False,
-            "heavy_distortion": False,
             "grayscale_selected": False,
+            "heavy_distortion": False
         }
 
-        heavy_distortions = {"blur", "jpeg_artefacts", "compression", "noise_adding"}
+        heavy_distortions = {"jpeg_artefacts", "noise_adding"}
 
         for t in transforms_to_sample:
             if t == "grayscale" and is_gray:
                 continue
             if random.random() >= p:
                 continue
+            
+            if t == "grayscale":
+                flags["grayscale_selected"] = True
 
             if t == "color_jitter":
                 if flags["grayscale_selected"]:
