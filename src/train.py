@@ -186,8 +186,18 @@ def train_model(model, train_loader, val_loader, config, augmentation_scheduler)
 
             optimizer.zero_grad()
             orig_batch_features, aug_batch_features = model.extract_image_embeddings(orig_batch, aug_batch)
-            orig_all_features = orig_batch_features.unsqueeze(1).expand(B, B, -1).reshape(B * B, -1)
-            aug_all_features = aug_batch_features.unsqueeze(0).expand(B, B, -1).reshape(B * B, -1)
+            # orig_batch_features: (B, L, D)
+            B, L, D = orig_batch_features.shape
+
+            # Expand orig: (B, 1, L, D) --> (B, B, L, D)
+            orig_all_features = orig_batch_features.unsqueeze(1).expand(B, B, L, D)
+
+            # Expand aug: (1, B, L, D) --> (B, B, L, D)
+            aug_all_features = aug_batch_features.unsqueeze(0).expand(B, B, L, D)
+
+            # Flatten to (B*B, L, D)
+            orig_all_features = orig_all_features.reshape(B * B, L, D)
+            aug_all_features = aug_all_features.reshape(B * B, L, D)
 
             pos_idx = idx_batch
             neg_idx = create_negative_idx(
@@ -248,8 +258,18 @@ def train_model(model, train_loader, val_loader, config, augmentation_scheduler)
                 idx_batch = idx_batch.to(device)
 
                 orig_batch_features, aug_batch_features = model.extract_image_embeddings(orig_batch, aug_batch)
-                orig_all_features = orig_batch_features.unsqueeze(1).expand(B, B, -1).reshape(B * B, -1)
-                aug_all_features = aug_batch_features.unsqueeze(0).expand(B, B, -1).reshape(B * B, -1)
+                # orig_batch_features: (B, L, D)
+                B, L, D = orig_batch_features.shape
+
+                # Expand orig: (B, 1, L, D) --> (B, B, L, D)
+                orig_all_features = orig_batch_features.unsqueeze(1).expand(B, B, L, D)
+
+                # Expand aug: (1, B, L, D) --> (B, B, L, D)
+                aug_all_features = aug_batch_features.unsqueeze(0).expand(B, B, L, D)
+
+                # Flatten to (B*B, L, D)
+                orig_all_features = orig_all_features.reshape(B * B, L, D)
+                aug_all_features = aug_all_features.reshape(B * B, L, D)
 
                 pos_idx = idx_batch
                 neg_idx = create_negative_idx(

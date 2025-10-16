@@ -148,42 +148,6 @@ class SelfAttention(nn.Module):
         return y
 
 
-# ---------- Cross-attention from token sequence to a single combined image embedding ----------
-class CombinedEmbeddingCrossAttention(nn.Module):
-    """
-    Cross-attention from token sequence to a single combined image embedding.
-    Used to inject image context into the token stream.
-    """
-    def __init__(self, config: DictConfig):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(
-            embed_dim=config.n_embd,
-            num_heads=config.n_head,
-            dropout=config.dropout,
-            bias=config.bias,
-            batch_first=True,
-        )
-        self.resid_dropout = nn.Dropout(config.dropout)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        combined_embedding: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Args:
-            x: Token embeddings [B, T, n_embd].
-            combined_embedding: Global image embedding [B, 1, n_embd].
-
-        Returns:
-            Output of cross-attention [B, T, n_embd].
-        """
-        k = v = combined_embedding  # [B, 1, n_embd]
-        y, _ = self.attn(query=x, key=k, value=v, need_weights=False)
-        y = self.resid_dropout(y)
-        return y
-
-
 # ---------- Feed-forward network with configurable activation ----------
 class SwiGLU(nn.Module):
     """SwiGLU activation: silu(gate) * up."""
@@ -227,14 +191,14 @@ class MLP(nn.Module):
         return self.dropout_layer(x)
 
 
-# ---------- Cross-attention from token sequence to image context embeddings ----------
-class CombinedEmbeddingCrossAttention(nn.Module):
+# ---------- Cross-attention from token sequence to images context embeddings ----------
+class CrossAttention(nn.Module):
     """
-    Cross-attention from token sequence to image context embeddings.
+    Cross-attention from token sequence to images context embeddings.
     
     The image context can be:
-        - A single fused embedding: [B, 1, n_embd]
-        - A sequence of embeddings (e.g., from two images): [B, L, n_embd], where L >= 1
+        - A single fused embedding from two images: [B, 1, n_embd]
+        - A sequence of embeddings from two images: [B, L, n_embd], where L >= 1
     
     Used to inject visual information into the token stream.
     """
@@ -252,18 +216,17 @@ class CombinedEmbeddingCrossAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        combined_embedding: torch.Tensor,
+        images_embeddings: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
             x: Token embeddings [B, T, n_embd].
-            combined_embedding: Image context embeddings [B, L, n_embd], where L >= 1.
-                Typically L=1 (fused pair) or L=2 (separate image features).
+            images_embeddings: Images context embeddings [B, L, n_embd], where L >= 1.
 
         Returns:
             Output of cross-attention [B, T, n_embd].
         """
-        k = v = combined_embedding  # [B, L, n_embd]
+        k = v = images_embeddings  # [B, L, n_embd]
         y, _ = self.attn(query=x, key=k, value=v, need_weights=False)
         y = self.resid_dropout(y)
         return y
@@ -282,25 +245,25 @@ class DecoderBlock(nn.Module):
         self.ln_1 = nn.LayerNorm(config.n_embd, elementwise_affine=config.bias)
         self.attn = SelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd, elementwise_affine=config.bias)
-        self.cross_attn = CombinedEmbeddingCrossAttention(config)
+        self.cross_attn = CrossAttention(config)
         self.ln_3 = nn.LayerNorm(config.n_embd, elementwise_affine=config.bias)
         self.mlp = MLP(config)
 
     def forward(
         self,
         x: torch.Tensor,
-        combined_embedding: torch.Tensor,
+        images_embeddings: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
             x: Token embeddings [B, T, n_embd].
-            combined_embedding: Image context embeddings [B, L, n_embd], L >= 1.
+            images_embeddings: Images context embeddings [B, L, n_embd], L >= 1.
 
         Returns:
             Updated token embeddings [B, T, n_embd].
         """
         x = x + self.attn(self.ln_1(x))
-        x = x + self.cross_attn(self.ln_2(x), combined_embedding)
+        x = x + self.cross_attn(self.ln_2(x), images_embeddings)
         x = x + self.mlp(self.ln_3(x))
         return x
 
@@ -311,8 +274,8 @@ class TransformDecoder(nn.Module):
     Autoregressive transformer decoder for generating token sequences conditioned on image context.
 
     Supports flexible image conditioning:
-        - A single fused embedding: [B, 1, n_embd]
-        - A sequence of embeddings (e.g., from two separate images): [B, L, n_embd], L >= 1
+        - A single fused embedding from two images: [B, 1, n_embd]
+        - A sequence of embeddings from two separate images: [B, L, n_embd], L >= 1
 
     Also supports two positional encoding strategies:
         - "learned": trainable position embeddings (default, backward-compatible)
@@ -380,7 +343,7 @@ class TransformDecoder(nn.Module):
     def forward(
         self,
         idx: torch.Tensor,
-        combined_embedding: torch.Tensor,
+        images_embeddings: torch.Tensor,
         targets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -388,10 +351,7 @@ class TransformDecoder(nn.Module):
 
         Args:
             idx: Input token IDs [B, T].
-            combined_embedding: Image context embeddings [B, L, n_embd], where L >= 1.
-                Examples:
-                    - L=1: fused pair embedding
-                    - L=2: separate embeddings from two images
+            images_embeddings: Images context embeddings [B, L, n_embd], where L >= 1.
             targets: Optional target token IDs [B, T] for training.
 
         Returns:
@@ -412,7 +372,7 @@ class TransformDecoder(nn.Module):
             x = self.dropout(tok_emb)
 
         for block in self.blocks:
-            x = block(x, combined_embedding)
+            x = block(x, images_embeddings)
         x = self.ln_f(x)
         logits = self.lm_head(x)
 
@@ -428,7 +388,7 @@ class TransformDecoder(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        combined_embedding: torch.Tensor,
+        images_embeddings: torch.Tensor,
         max_new_tokens: int = 10,
         temperature: float = 1.0,
         top_k: Optional[int] = None,
@@ -441,7 +401,7 @@ class TransformDecoder(nn.Module):
         Generate sequences conditioned on image context.
 
         Args:
-            combined_embedding: Image context embeddings [B, L, n_embd], L >= 1.
+            images_embeddings: Images context embeddings [B, L, n_embd], L >= 1.
             max_new_tokens: Maximum number of new tokens to generate.
             temperature: Softmax temperature for sampling.
             top_k: If not None, only sample from top-k logits.
@@ -451,8 +411,8 @@ class TransformDecoder(nn.Module):
         Returns:
             Generated token sequences [B, 1 + max_new_tokens].
         """
-        B = combined_embedding.shape[0]
-        device = combined_embedding.device
+        B = images_embeddings.shape[0]
+        device = images_embeddings.device
         total_len = 1 + max_new_tokens
         if total_len > self.max_seq_len:
             raise ValueError(f"Total length {total_len} exceeds max_seq_len {self.max_seq_len}")
@@ -466,7 +426,7 @@ class TransformDecoder(nn.Module):
 
         for _ in range(max_new_tokens):
             idx_cond = idx if idx.size(1) <= self.max_seq_len else idx[:, -self.max_seq_len:]
-            logits, _ = self(idx_cond, combined_embedding)
+            logits, _ = self(idx_cond, images_embeddings)
             next_logits = logits[:, -1, :] / temperature
 
             next_logits[:, pad_token_id] = -float('inf')

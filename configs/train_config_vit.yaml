@@ -15,15 +15,8 @@ model:
   initialization_weights_path: null
   encoder:
     type: 'vit'
-    n_embd: 512
-    patch_size: 14
-    n_layer: 3
-    n_head: 8
-    ffn_ratio: 4
-    dropout: 0.1
-    activation: "gelu"
-    use_cls_token: False
-    final_norm: True
+    freeze_image_encoder: False
+    out_token_n_embd: 512
   decoder:
     pos_encoding: 'learned'
     rope_base: null
@@ -52,5 +45,5 @@ scheduler:
 
 augmentation:
   initial_p: 0.3
-  milestones: [20]
-  probs: [0.5]
+  milestones: []
+  probs: []

@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 
 
 def main(data_path):
-    config_path = "configs/train_config_009.yaml"
+    config_path = "configs/train_config_010.yaml"
     train_config = OmegaConf.load(config_path)
 
     model = ImageTransformPredictor(train_config.model)

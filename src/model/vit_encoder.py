@@ -1,98 +1,148 @@
 import torch
 import torch.nn as nn
-from typing import Tuple
+from torchvision import transforms
+from torchvision.models import vit_b_16, ViT_B_16_Weights
+from torchvision.transforms import Compose
 from omegaconf import DictConfig
 
 
-def interpolate_pos_encoding_2d(
-    pos_embed: torch.Tensor,
-    grid_h: int,
-    grid_w: int,
-    orig_grid_h: int = 14,
-    orig_grid_w: int = 14,
-) -> torch.Tensor:
-    """Bicubic interpolation of 2D positional embeddings (DeiT / MAE style)."""
-    if grid_h == orig_grid_h and grid_w == orig_grid_w:
-        return pos_embed
-    dim = pos_embed.shape[-1]
-    pos_embed = pos_embed.reshape(1, orig_grid_h, orig_grid_w, dim).permute(0, 3, 1, 2)
-    pos_embed = nn.functional.interpolate(
-        pos_embed, size=(grid_h, grid_w), mode="bicubic", align_corners=False
-    )
-    return pos_embed.permute(0, 2, 3, 1).flatten(1, 2)
+class ViTImageEncoder(nn.Module):
+    """
+    Image encoder based on Vision Transformer (ViT) from torchvision.
 
+    Extracts a full sequence of patch and class tokens from input images using a pretrained
+    ViT-B/16 model. The output includes all tokens before the final classification head,
+    preserving spatial and semantic information as a sequence.
 
-class PatchEmbed(nn.Module):
-    def __init__(self, patch_size: int, n_embd: int):
-        super().__init__()
-        self.patch_size = patch_size
-        self.proj = nn.Conv2d(3, n_embd, kernel_size=patch_size, stride=patch_size)
+    Attributes:
+        preprocess (Compose): ImageNet-compatible preprocessing pipeline.
+        feature_dim (int): Dimensionality of each token (e.g., 768 for ViT-B/16).
+    """
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int]]:
-        B, _, H, W = x.shape
-        assert H % self.patch_size == 0 and W % self.patch_size == 0, \
-            f"Image dimensions must be divisible by patch_size={self.patch_size}"
-        x = self.proj(x)
-        grid_h, grid_w = x.shape[2], x.shape[3]
-        x = x.flatten(2).transpose(1, 2)  # [B, N, n_embd]
-        return x, (grid_h, grid_w)
+    def __init__(self, freeze=True):
+        """
+        Initializes the ViT encoder.
 
-
-class FlexibleViTEncoder(nn.Module):
-    def __init__(self, config: DictConfig):
+        Args:
+            freeze (bool): If True, freezes all parameters of the ViT backbone.
+                           Defaults to True.
+        """
         super().__init__()
 
-        self.n_embd = config.n_embd
-        self.patch_size = config.patch_size
-        self.use_cls_token = config.get("use_cls_token", False)
+        # Load pretrained ViT-B/16
+        weights = ViT_B_16_Weights.IMAGENET1K_V1
+        self.vit = vit_b_16(weights=weights)
 
-        self.patch_embed = PatchEmbed(patch_size=self.patch_size, n_embd=self.n_embd)
-        self.pos_embed = nn.Parameter(torch.zeros(1, 14 * 14, self.n_embd))
-        if self.use_cls_token:
-            self.cls_token = nn.Parameter(torch.zeros(1, 1, self.n_embd))
+        # Remove classification head
+        self.vit.heads = nn.Identity()
 
-        self.dropout = nn.Dropout(config.dropout)
-        self.norm = nn.LayerNorm(self.n_embd) if config.get("final_norm", True) else nn.Identity()
+        # Freeze backbone if needed
+        for param in self.vit.parameters():
+            param.requires_grad = not freeze
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.n_embd,
-            nhead=config.n_head,
-            dim_feedforward=int(self.n_embd * config.ffn_ratio),
-            dropout=config.dropout,
-            activation=config.get("activation", "gelu"),
-            batch_first=True,
-            norm_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=config.n_layer, enable_nested_tensor=False)
+        # Feature dimension = hidden size of ViT
+        self.feature_dim = self.vit.hidden_dim  # 768 for ViT-B/16
+
+        # Official preprocessing
+        self.preprocess_transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+
+    @property
+    def preprocess(self) -> Compose:
+        """Returns the ImageNet-compatible preprocessing pipeline."""
+        return self.preprocess_transform
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, (grid_h, grid_w) = self.patch_embed(x)
-        pos_embed = interpolate_pos_encoding_2d(self.pos_embed, grid_h, grid_w).to(x.device)
+        """
+        Encodes a batch of images into a sequence of tokens.
 
-        if self.use_cls_token:
-            cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
-            x = torch.cat([cls_tokens, x], dim=1)
-            cls_pos = torch.zeros(1, 1, self.n_embd, device=x.device)
-            pos_embed = torch.cat([cls_pos, pos_embed], dim=1)
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, 3, 224, 224],
+                              normalized with ImageNet statistics.
 
-        x = x + pos_embed
-        x = self.dropout(x)
-        x = self.transformer(x)
-        x = self.norm(x)
-        return x
+        Returns:
+            torch.Tensor: Token embeddings of shape [batch_size, num_tokens, feature_dim],
+                          where num_tokens = 196 (patches) + 1 (class token) = 197.
+        """
+        # Patch embedding
+        n = x.shape[0]
+        x = self.vit._process_input(x)  # [B, C, H, W] -> [B, N, D]
+
+        # Expand class token
+        batch_class_token = self.vit.class_token.expand(n, -1, -1)  # [B, 1, D]
+        x = torch.cat([batch_class_token, x], dim=1)  # [B, N+1, D]
+
+        # Apply transformer
+        x = self.vit.encoder(x)  # [B, N+1, D]
+
+        return x  # All tokens, no projection
+
+    def extract_image_embeddings(self, image_batch: torch.Tensor) -> torch.Tensor:
+        """Extracts token-level embeddings from a batch of images."""
+        return self.forward(image_batch)
 
 
-class ImagePairViT(nn.Module):
+class ImagePairEncoderViT(nn.Module):
+    """
+    Encoder for pairs of images using a pretrained Vision Transformer (ViT).
+
+    Each image is independently encoded and projected into the decoder's token embedding space
+    of dimension `out_token_n_embd`. A learnable separator token (in the target space) is inserted
+    between the two sequences to form a single combined token sequence.
+
+    Output shape: [batch_size, L1 + 1 + L2, out_token_n_embd], where L1 = L2 = 197.
+
+    Attributes:
+        preprocess (Compose): ImageNet-compatible preprocessing pipeline.
+        output_dim (int): Equals `out_token_n_embd` from the configuration.
+    """
+
     def __init__(self, config: DictConfig):
-        super().__init__()
-        self.encoder = FlexibleViTEncoder(config)
-        self.sep_token = nn.Parameter(torch.randn(1, 1, config.n_embd))
+        """
+        Initializes the paired image encoder.
 
-    def extract_image_embeddings(self, image_batch_1, image_batch_2):
-        """Extract embeddings for two image batches."""
-        features_1 = self.encoder(image_batch_1)
-        features_2 = self.encoder(image_batch_2)
-        return features_1, features_2
+        Args:
+            config (DictConfig): Configuration object containing:
+                - freeze_image_encoder (bool): Whether to freeze the ViT backbone.
+                - out_token_n_embd (int): Target dimension for output tokens.
+        """
+        super().__init__()
+        self.config = config
+
+        self.image_encoder = ViTImageEncoder(freeze=config.freeze_image_encoder)
+
+        if not hasattr(config, 'out_token_n_embd'):
+            raise ValueError("Config must contain 'out_token_n_embd'")
+
+        # Projection to decoder's token space
+        self.proj = nn.Linear(self.image_encoder.feature_dim, config.out_token_n_embd)
+
+        # Learnable separator in target space
+        self.sep_token = nn.Parameter(torch.randn(1, 1, config.out_token_n_embd))
+
+        self.output_dim = config.out_token_n_embd
+
+    @property
+    def preprocess(self) -> Compose:
+        """Returns the ImageNet-compatible preprocessing pipeline."""
+        return self.image_encoder.preprocess
+
+    def extract_image_embeddings(self, image_batch_1: torch.Tensor, image_batch_2: torch.Tensor):
+        """
+        Encodes two image batches and projects their tokens into the decoder's embedding space.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Each of shape [B, 197, out_token_n_embd].
+        """
+        tokens1 = self.image_encoder(image_batch_1)  # [B, 197, D]
+        tokens2 = self.image_encoder(image_batch_2)  # [B, 197, D]
+
+        proj1 = self.proj(tokens1)  # [B, 197, E]
+        proj2 = self.proj(tokens2)  # [B, 197, E]
+        return proj1, proj2
 
     def forward(
         self,
@@ -100,12 +150,25 @@ class ImagePairViT(nn.Module):
         image_batch_2: torch.Tensor,
         use_precomputed_embeddings: bool = False
     ) -> torch.Tensor:
-        if not use_precomputed_embeddings:
-            tokens1 = self.encoder(image_batch_1)
-            tokens2 = self.encoder(image_batch_2)
-        else:
-            tokens1, tokens2 = image_batch_1, image_batch_2
+        """
+        Encodes a pair of images into a combined token sequence.
 
-        B = tokens1.shape[0]
-        sep = self.sep_token.expand(B, -1, -1)
-        return torch.cat([tokens1, sep, tokens2], dim=1)
+        Args:
+            image_batch_1, image_batch_2:
+                If use_precomputed_embeddings=False: [B, 3, 224, 224] (ImageNet-normalized).
+                If True: [B, 197, out_token_n_embd] (already projected tokens).
+            use_precomputed_embeddings: Skip encoder and projection if True.
+
+        Returns:
+            torch.Tensor: [B, 197 + 1 + 197, out_token_n_embd] = [B, 395, out_token_n_embd]
+        """
+        if not use_precomputed_embeddings:
+            proj1, proj2 = self.extract_image_embeddings(image_batch_1, image_batch_2)
+        else:
+            proj1, proj2 = image_batch_1, image_batch_2
+
+        B = proj1.shape[0]
+        sep = self.sep_token.expand(B, -1, -1)  # [B, 1, out_token_n_embd]
+        combined = torch.cat([proj1, sep, proj2], dim=1)  # [B, 395, out_token_n_embd]
+
+        return combined

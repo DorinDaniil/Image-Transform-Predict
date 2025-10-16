@@ -16,7 +16,7 @@ model:
   encoder:
     type: 'efficientnet'
     freeze_image_encoder: False
-    combined_emb_dim: 512
+    out_token_n_embd: 512
   decoder:
     n_embd: 512
     ffn_ratio: 4

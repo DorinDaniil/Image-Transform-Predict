@@ -2,9 +2,11 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig
 from typing import Optional, Tuple
-from .efficientnet_encoder import ImagePairEfficientNet
+
 from .decoder import TransformDecoder
-from .vit_encoder import ImagePairViT
+from .efficientnet_encoder import ImagePairEncoderEfficientNet
+from .vit_encoder import ImagePairEncoderViT
+
 
 class ImageTransformPredictor(nn.Module):
     """
@@ -15,10 +17,10 @@ class ImageTransformPredictor(nn.Module):
         self.config = config
 
         encoder_type = config.encoder.get("type", "efficientnet")
-        if encoder_type == "vit":
-            self.image_pair_encoder = ImagePairViT(config.encoder)
-        else:
-            self.image_pair_encoder = ImagePairEfficientNet(config.encoder)
+        if encoder_type == "efficientnet":
+            self.image_pair_encoder = ImagePairEncoderEfficientNet(config.encoder)
+        elif encoder_type == "vit":
+            self.image_pair_encoder = ImagePairEncoderViT(config.encoder)
 
         self.bos_token_id = config.decoder.bos_token_id
         self.eos_token_id = config.decoder.eos_token_id
@@ -33,7 +35,7 @@ class ImageTransformPredictor(nn.Module):
             image_batch_1 (torch.Tensor): First batch of images with shape [batch_size, 3, 224, 224].
             image_batch_2 (torch.Tensor): Second batch of images with shape [batch_size, 3, 224, 224].
         Returns:
-            tuple: (features_1, features_2) — two batches of embeddings.
+            tuple: (features_1, features_2) two batches of embeddings.
         """
         return self.image_pair_encoder.extract_image_embeddings(image_batch_1, image_batch_2)
 
@@ -47,13 +49,13 @@ class ImageTransformPredictor(nn.Module):
         """
         Forward pass.
         """
-        combined_embedding = self.image_pair_encoder(image_batch_1, image_batch_2, use_precomputed_embeddings)
+        images_embeddings = self.image_pair_encoder(image_batch_1, image_batch_2, use_precomputed_embeddings)
 
         targets = torch.roll(idx, shifts=-1, dims=1)
         targets[:, -1] = self.pad_token_id
         logits, loss = self.transform_decoder(
             idx=idx,
-            combined_embedding=combined_embedding,
+            images_embeddings=images_embeddings,
             targets=targets
         )
         return logits, loss
@@ -82,9 +84,9 @@ class ImageTransformPredictor(nn.Module):
         if eos_token_id is None:
             eos_token_id = self.eos_token_id
 
-        combined_embedding = self.image_pair_encoder(image_batch_1, image_batch_2)
+        images_embeddings = self.image_pair_encoder(image_batch_1, image_batch_2)
         return self.transform_decoder.generate(
-            combined_embedding=combined_embedding,
+            images_embeddings=images_embeddings,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_k=top_k,
