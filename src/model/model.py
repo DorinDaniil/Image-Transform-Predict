@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from omegaconf import DictConfig
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 from .decoder import TransformDecoder
 from .efficientnet_encoder import ImagePairEncoderEfficientNet
@@ -94,4 +94,40 @@ class ImageTransformPredictor(nn.Module):
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id
+        )
+
+    @torch.no_grad()
+    def generate_step_with_cross_attn(
+        self,
+        image_batch_1: torch.Tensor,
+        image_batch_2: torch.Tensor,
+        idx_prefix: Optional[torch.Tensor] = None,
+        use_precomputed_embeddings: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
+        """
+        Run one autoregressive generation step and return cross-attention weights.
+        
+        Args:
+            image_batch_1, image_batch_2: [B, 3, H, W] or precomputed embeddings if use_precomputed_embeddings=True
+            idx_prefix: [B, T] token IDs (e.g., [BOS]). If None → starts with [BOS].
+            use_precomputed_embeddings: if True, treats img batches as [B, L, D] embeddings.
+
+        Returns:
+            next_logits: [B, vocab_size]
+            next_token: [B]
+            cross_attn_per_layer: list of length n_layer, each: [B, n_head, L_key]
+                where L_key = 395 for ViT-B/16 (197 + 1 + 197)
+        """
+        if idx_prefix is None:
+            device = image_batch_1.device if not use_precomputed_embeddings else image_batch_1.device
+            B = image_batch_1.shape[0]
+            idx_prefix = torch.full((B, 1), self.bos_token_id, dtype=torch.long, device=device)
+
+        images_embeddings = self.image_pair_encoder(
+            image_batch_1, image_batch_2, use_precomputed_embeddings=use_precomputed_embeddings
+        )
+
+        return self.transform_decoder.generate_step_with_cross_attn(
+            images_embeddings=images_embeddings,
+            idx_prefix=idx_prefix,
         )

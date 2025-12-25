@@ -95,7 +95,7 @@ class ImageTransformer:
             "crop": 10,
             "horizontal_flip": 11,
             "vertical_flip": 12,
-            # "jpeg_artefacts": 13,
+            "jpeg_artefacts": 13,
         }
         self.transformations = list(self.transform_tokens.keys())
         self._current_p = 0.3  # default fallback

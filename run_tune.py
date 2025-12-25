@@ -13,7 +13,7 @@ from src.tuning import train_model
 
 
 def main(data_path):
-    config_path = "configs/train_config_011.yaml"
+    config_path = "configs/train_config_vit.yaml"
     train_config = OmegaConf.load(config_path)
 
     # Initialize model
@@ -30,7 +30,10 @@ def main(data_path):
 
     # Define dataset batch names
     batch_names = [
-        "dataset_0", "dataset_1", "dataset_5", "dataset_9"
+        "dataset_0", "dataset_1", "dataset_5", "dataset_9",
+        "dataset_2", "dataset_18", "dataset_27", "dataset_36",
+        "dataset_45", "dataset_270", "dataset_281", "dataset_150",
+        "dataset_180"
     ]
 
     # Get dataloaders for negative pair dataset

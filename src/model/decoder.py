@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from omegaconf import DictConfig
 
 
@@ -217,6 +217,7 @@ class CrossAttention(nn.Module):
         self,
         x: torch.Tensor,
         images_embeddings: torch.Tensor,
+        need_weights: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -227,9 +228,19 @@ class CrossAttention(nn.Module):
             Output of cross-attention [B, T, n_embd].
         """
         k = v = images_embeddings  # [B, L, n_embd]
-        y, _ = self.attn(query=x, key=k, value=v, need_weights=False)
-        y = self.resid_dropout(y)
-        return y
+        if not need_weights:
+            y, _ = self.attn(query=x, key=k, value=v, need_weights=False)
+            y = self.resid_dropout(y)
+            return y
+        else:
+            y, attn_weights = self.attn(query=x,
+                key=k,
+                value=v,
+                need_weights=need_weights,
+                average_attn_weights=False,
+            )
+            y = self.resid_dropout(y)
+            return y, attn_weights
 
 
 # ---------- Transformer decoder block ----------
@@ -266,6 +277,26 @@ class DecoderBlock(nn.Module):
         x = x + self.cross_attn(self.ln_2(x), images_embeddings)
         x = x + self.mlp(self.ln_3(x))
         return x
+
+    def forward_with_cross_attn(
+        self,
+        x: torch.Tensor,
+        images_embeddings: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass that *always* returns cross-attention weights (per-head, full T x L).
+        For analysis/visualization only.
+        Returns:
+            x_out: [B, T, n_embd]
+            cross_attn_weights: [B, n_head, T, L]
+        """
+        x = x + self.attn(self.ln_1(x))
+        cross_out, attn_weights = self.cross_attn(
+            self.ln_2(x), images_embeddings, need_weights=True
+        )
+        x = x + cross_out
+        x = x + self.mlp(self.ln_3(x))
+        return x, attn_weights
 
 
 # ---------- Main autoregressive transformer decoder ----------
@@ -386,6 +417,48 @@ class TransformDecoder(nn.Module):
         return logits, loss
 
     @torch.no_grad()
+    def forward_with_cross_attn(
+        self,
+        idx: torch.Tensor,
+        images_embeddings: torch.Tensor,
+        return_last_step_only: bool = True,
+    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        """
+        Forward pass that returns cross-attention weights from all layers.
+        Designed for analysis — NOT for training.
+    
+        Args:
+            idx: [B, T]
+            images_embeddings: [B, L, n_embd]
+            return_last_step_only: if True, returns attn only for last query token (T-1)
+    
+        Returns:
+            logits: [B, T, vocab_size]
+            cross_attn_per_layer: list of [B, n_head, L] (if last_step) or [B, n_head, T, L]
+        """
+        _, T = idx.shape
+        tok_emb = self.token_embedding(idx)
+    
+        if self.pos_encoding == "learned":
+            pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+            pos_emb = self.position_embedding(pos)
+            x = self.dropout(tok_emb + pos_emb)
+        else:
+            x = self.dropout(tok_emb)
+    
+        cross_attn_list = []
+    
+        for block in self.blocks:
+            x, attn_w = block.forward_with_cross_attn(x, images_embeddings)  # [B, H, T, L]
+            if return_last_step_only:
+                attn_w = attn_w[:, :, -1, :]  # [B, H, L]
+            cross_attn_list.append(attn_w)
+    
+        x = self.ln_f(x)
+        logits = self.lm_head(x)
+        return logits, cross_attn_list
+
+    @torch.no_grad()
     def generate(
         self,
         images_embeddings: torch.Tensor,
@@ -463,3 +536,32 @@ class TransformDecoder(nn.Module):
                 idx[i, first_end + 1:] = pad_token_id
 
         return idx
+
+    @torch.no_grad()
+    def generate_step_with_cross_attn(
+        self,
+        images_embeddings: torch.Tensor,
+        idx_prefix: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
+        """
+        Run *one* autoregressive step and return:
+        - next-token logits & ID,
+        - cross-attention weights (last query position, per layer).
+    
+        Args:
+            images_embeddings: [B, L, n_embd]
+            idx_prefix: [B, T] — current sequence (e.g., [BOS] or [BOS, tok1, ...])
+    
+        Returns:
+            next_logits: [B, vocab_size]
+            next_token: [B]
+            cross_attn: list of [B, n_head, L], len = n_layer
+        """
+        logits, cross_attn = self.forward_with_cross_attn(
+            idx=idx_prefix,
+            images_embeddings=images_embeddings,
+            return_last_step_only=True,
+        )
+        next_logits = logits[:, -1, :]  # [B, vocab]
+        next_token = torch.argmax(next_logits, dim=-1)  # greedy
+        return next_logits, next_token, cross_attn

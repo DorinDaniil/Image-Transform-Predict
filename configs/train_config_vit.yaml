@@ -2,17 +2,19 @@ training:
   start_epoch: 0
   resume: True
   num_epochs: 50
+  # batch_size: 32
   batch_size: 32
   device: 'cuda:0'
   checkpoint_interval: 1
-  checkpoint_dir: '/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/checkpoints/itp_vit'
+  checkpoint_dir: '/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/itp_vit_tune_full'
 
 data:
-  tensorboard_logdir: '/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/logs/itp_vit'
+  tensorboard_logdir: '/mnt/DATA2/dorin/Image-Transform-Predict/logs/itp_vit_tune_full'
 
 model:
   model_name: 'itp_vit'
-  initialization_weights_path: null
+  # initialization_weights_path: null
+  initialization_weights_path: "/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/itp_vit/model_weights.pth"
   encoder:
     type: 'vit'
     freeze_image_encoder: False
@@ -35,7 +37,8 @@ model:
 
 optimizer:
   name: 'AdamW'
-  lr: 0.001
+  # lr: 0.001
+  lr: 0.0001
   weight_decay: 0.01
   betas: [0.9, 0.999]
 

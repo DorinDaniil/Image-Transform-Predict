@@ -132,7 +132,7 @@ def get_scheduler(opt, config):
     return sched
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, config, augmentation_scheduler=None):
+def save_checkpoint(model, optimizer, scheduler, epoch, config):
     """Save model checkpoint."""
     checkpoint = {
         'epoch': epoch,
@@ -140,8 +140,6 @@ def save_checkpoint(model, optimizer, scheduler, epoch, config, augmentation_sch
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict()
     }
-    if augmentation_scheduler is not None:
-        checkpoint['augmentation_scheduler_state_dict'] = augmentation_scheduler.state_dict()
 
     checkpoint_dir = config['training']['checkpoint_dir']
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -151,16 +149,14 @@ def save_checkpoint(model, optimizer, scheduler, epoch, config, augmentation_sch
     print(f'Checkpoint saved at epoch {epoch}')
 
 
-def load_checkpoint(model, optimizer, scheduler, checkpoint_path, augmentation_scheduler=None):
+def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
     """Load model checkpoint if exists."""
     if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         epoch = checkpoint['epoch']
-        if augmentation_scheduler is not None and 'augmentation_scheduler_state_dict' in checkpoint:
-            augmentation_scheduler.load_state_dict(checkpoint['augmentation_scheduler_state_dict'])
         print(f'Checkpoint loaded from epoch {epoch}')
         return epoch
     else:
