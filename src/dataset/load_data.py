@@ -41,7 +41,7 @@ def save_domainnet_dataset(output_dir, include_test=True):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Save DomainNet dataset as JPG images.')
     parser.add_argument('--output_dir', type=str,
-                        default="/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/src/data_main",
+                        default="/mnt/DATA2/dorin/Image-Transform-Predict/data",
                         help='Output directory path where images will be saved.')
     parser.add_argument('--include_test', default=True,
                         help='If set, also saves the test split into the same subfolders.')

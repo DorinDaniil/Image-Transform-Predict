@@ -294,3 +294,169 @@ class ImageTransformer:
         for transform in sequence:
             transformed_image = self.apply_transform(transformed_image, transform)
         return transformed_image.convert('RGB'), sequence
+
+
+    def sample_transformations_by_length(self, image: Image.Image, k: int) -> List[str]:
+        """
+        Sample exactly k transformations (1 <= k <= 5), respecting semantic constraints.
+        
+        Args:
+            image: Input image (used to check if grayscale).
+            k: Desired number of transformations (1 <= k <= 5).
+            
+        Returns:
+            List of exactly k transformation names.
+            If k == 1, may return ["noop"] with 5% probability.
+            For k >= 2, NEVER includes "noop".
+        """
+        if not (1 <= k <= 5):
+            raise ValueError("k must be between 1 and 5")
+    
+        is_gray = self.is_grayscale(image)
+        transforms_to_sample = [t for t in self.transformations if t != "noop"]
+        random.shuffle(transforms_to_sample)
+    
+        # Special case: k == 1
+        if k == 1:
+            if random.random() < 0.05:  # 5% chance of noop
+                return ["noop"]
+            for t in transforms_to_sample:
+                if t == "grayscale" and is_gray:
+                    continue
+                # Check basic validity
+                if t == "grayscale":
+                    return [t]
+                elif t == "color_jitter":
+                    if not is_gray:
+                        return [t]
+                elif t in ("jpeg_artefacts", "noise_adding"):
+                    return [t]
+                elif t in ("rotate_90", "rotate_180", "rotate_270", "horizontal_flip", "vertical_flip", "crop"):
+                    return [t]
+            return ["noop"]
+    
+        # Case k >= 2
+        selected = []
+        flags = {
+            "r180": False,
+            "h": False,
+            "v": False,
+            "rot": False,
+            "grayscale_selected": is_gray,
+            "heavy_distortion": False
+        }
+    
+        heavy_distortions = {"jpeg_artefacts", "noise_adding"}
+    
+        for t in transforms_to_sample:
+            if len(selected) >= k:
+                break
+            if t in selected:  # ensure uniqueness
+                continue
+            if t == "grayscale" and is_gray:
+                continue
+    
+            if t == "grayscale":
+                selected.append(t)
+                flags["grayscale_selected"] = True
+    
+            elif t == "color_jitter":
+                if not flags["grayscale_selected"]:
+                    selected.append(t)
+    
+            elif t in heavy_distortions:
+                if not flags["heavy_distortion"]:
+                    selected.append(t)
+                    flags["heavy_distortion"] = True
+    
+            elif t in ("rotate_90", "rotate_270"):
+                if not flags["rot"]:
+                    selected.append(t)
+                    flags["rot"] = True
+    
+            elif t == "rotate_180":
+                if not flags["rot"] and not (flags["h"] and flags["v"]):
+                    selected.append(t)
+                    flags["r180"] = True
+                    flags["rot"] = True
+    
+            elif t == "horizontal_flip":
+                if not (flags["r180"] and flags["v"]):
+                    selected.append(t)
+                    flags["h"] = True
+    
+            elif t == "vertical_flip":
+                if not (flags["r180"] and flags["h"]):
+                    selected.append(t)
+                    flags["v"] = True
+    
+            else:
+                selected.append(t)
+    
+        # If couldn't reach k, try to fill with safe transforms (respecting constraints)
+        while len(selected) < k:
+            possible = []
+            for t in transforms_to_sample:
+                if t in selected:
+                    continue
+                if t == "grayscale" and is_gray:
+                    continue
+    
+                valid = False
+                if t == "grayscale":
+                    valid = not flags["grayscale_selected"]
+                elif t == "color_jitter":
+                    valid = not flags["grayscale_selected"]
+                elif t in heavy_distortions:
+                    valid = not flags["heavy_distortion"]
+                elif t in ("rotate_90", "rotate_270"):
+                    valid = not flags["rot"]
+                elif t == "rotate_180":
+                    valid = not flags["rot"] and not (flags["h"] and flags["v"])
+                elif t == "horizontal_flip":
+                    valid = not (flags["r180"] and flags["v"])
+                elif t == "vertical_flip":
+                    valid = not (flags["r180"] and flags["h"])
+                else:
+                    valid = True
+    
+                if valid:
+                    possible.append(t)
+    
+            if not possible:
+                break
+            t = random.choice(possible)
+            selected.append(t)
+            # Update flags
+            if t == "grayscale":
+                flags["grayscale_selected"] = True
+            elif t in heavy_distortions:
+                flags["heavy_distortion"] = True
+            elif t in ("rotate_90", "rotate_270"):
+                flags["rot"] = True
+            elif t == "rotate_180":
+                flags["r180"] = True
+                flags["rot"] = True
+            elif t == "horizontal_flip":
+                flags["h"] = True
+            elif t == "vertical_flip":
+                flags["v"] = True
+    
+        # Final padding (fallback)
+        while len(selected) < k:
+            selected.append(selected[-1] if selected else "color_jitter")
+    
+        # Ensure no "noop" for k >= 2
+        selected = [t for t in selected if t != "noop"]
+        while len(selected) < k:
+            selected.append("color_jitter")
+    
+        return selected[:k]
+
+    def transform_by_length(self, image: Image.Image, k: int) -> Tuple[Image.Image, List[str]]:
+        """Apply exactly k transformations to the image."""
+        sequence = self.sample_transformations_by_length(image, k)
+        transformed_image = image.copy()
+        for transform in sequence:
+            transformed_image = self.apply_transform(transformed_image, transform)
+        return transformed_image.convert('RGB'), sequence
