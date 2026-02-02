@@ -7,8 +7,17 @@ from PIL import Image
 from tqdm import tqdm
 import json
 import re
+import sys
+import os
 import ast
 from qwen_vl_utils import process_vision_info
+from torch.utils.data import DataLoader
+
+src_path = '/mnt/DATA2/dorin/Image-Transform-Predict/src'
+if src_path not in sys.path:
+    sys.path.insert(0, src_path)
+
+from dataset import SimpleDomainNetDataset
 
 
 # Define transformation matrices
@@ -441,4 +450,219 @@ class QwenLengthWiseBenchmark:
         if verbose:
             print(f"\nSaved Qwen length-wise accuracy for '{model_name}' to '{output_path}'")
     
+        return results
+
+
+class DomainNetFullBenchmark:
+    def __init__(
+        self,
+        model,
+        dataset_root: str,
+        transformer,
+        tokenizer=None,
+        preprocess: Optional[Callable] = None,
+        device: torch.device = torch.device("cpu"),
+        transform_prob: float = 0.3,
+        max_gen_len: int = 15,
+        val_size: float = 0.1,
+        random_seed: int = 42,
+        batch_size: int = 1,
+        model_type: str = "custom"
+    ):
+        self.model = model
+        self.dataset_root = dataset_root
+        self.transformer = transformer
+        self.tokenizer = tokenizer
+        self.preprocess = preprocess
+        self.device = device
+        self.transform_prob = transform_prob
+        self.max_gen_len = max_gen_len
+        self.batch_size = batch_size
+        self.model_type = model_type
+
+        self.val_dataset = SimpleDomainNetDataset(
+            data_dir=dataset_root,
+            split="val",
+            val_size=val_size,
+            random_seed=random_seed
+        )
+
+        self.dataloader = DataLoader(
+            self.val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=lambda x: x
+        )
+
+    def _set_image_seed(self, image: Image.Image) -> None:
+        img_hash = hash(image.tobytes()) % (2**32)
+        random.seed(img_hash)
+        np.random.seed(img_hash % (2**32))
+        torch.manual_seed(img_hash)
+
+    def _parse_qwen_output(self, output_str: str) -> List[str]:
+        try:
+            match = re.search(r'\[.*\]', output_str)
+            if match:
+                parsed = ast.literal_eval(match.group(0))
+                if isinstance(parsed, list):
+                    return [str(x) for x in parsed]
+        except Exception:
+            pass
+        return []
+
+    def run(self, model_name: str, output_path: str, verbose: bool = True):
+        self.model.eval()
+        total_intersection = 0
+        total_union = 0
+        count = 0
+        domain_stats = {}
+
+        with torch.no_grad():
+            for batch in tqdm(self.dataloader, desc="DomainNet val"):
+                for orig_pil, domain in batch:
+                    try:
+                        orig = orig_pil.convert("RGB")
+                    except Exception:
+                        continue
+
+                    if domain not in domain_stats:
+                        domain_stats[domain] = {"intersection": 0, "union": 0, "count": 0}
+
+                    self._set_image_seed(orig)
+                    transformed, target_seq = self.transformer.transform(orig, p=self.transform_prob)
+
+                    if self.model_type == "custom":
+                        if self.preprocess is None:
+                            raise ValueError("preprocess must be provided for custom models")
+                        orig_tensor = self.preprocess(orig).unsqueeze(0).to(self.device)
+                        trans_tensor = self.preprocess(transformed).unsqueeze(0).to(self.device)
+                        generated_ids = self.model.generate(
+                            image_batch_1=orig_tensor,
+                            image_batch_2=trans_tensor,
+                            max_new_tokens=self.max_gen_len - 1,
+                            do_sample=False
+                        ).squeeze(0)
+                        pred_tokens = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+                        gt_tokens = target_seq
+
+                    elif self.model_type == "qwen":
+                        prompt = """You are given two images: Image A (original) and Image B (transformed).  
+                        Your task is to predict the sequence of transformations applied to Image A to obtain Image B, using only the following allowed operations:  
+                        "noop", "grayscale", "rotate_90", "rotate_180", "rotate_270", "color_jitter", "noise_adding", "jpeg_artefacts", "crop", "horizontal_flip", "vertical_flip".
+                        
+                        - The sequence may contain zero, one, or multiple transformations applied in order.  
+                        - If Image A and Image B are identical, return: ["noop"]
+                        - If Image B can be obtained by applying a sequence of the allowed transformations (in the correct order), return that sequence as a JSON list, e.g.: ["color_jitter", "noise_adding", "rotate_270", "horizontal_flip"]  
+                        - If the transformation from Image A to Image B requires any operation not in the allowed list (e.g., blur, resize, perspective distortion, etc.), or if the images are unrelated, return an empty list: []  
+                        
+                        Output only the JSON list. Do not add explanations, comments, or extra text."""
+                    
+                        try:
+                            # --- Подготовка входов ---
+                            messages = [{
+                                "role": "user",
+                                "content": [
+                                    {"type": "image", "image": orig},
+                                    {"type": "image", "image": transformed},
+                                    {"type": "text", "text": prompt},
+                                ],
+                            }]
+                    
+                            text = self.preprocess.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                            image_inputs, _ = process_vision_info(messages)
+                            inputs = self.preprocess(
+                                text=[text],
+                                images=image_inputs,
+                                padding=True,
+                                return_tensors="pt"
+                            )
+                    
+                            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                    
+                            generated_ids = self.model.generate(
+                                **inputs,
+                                max_new_tokens=128,
+                                do_sample=False,
+                                pad_token_id=self.preprocess.tokenizer.pad_token_id,
+                                eos_token_id=self.preprocess.tokenizer.eos_token_id,
+                                use_cache=False
+                            )
+                    
+                            input_len = inputs["input_ids"].size(1)
+                            out_ids = generated_ids[0, input_len:].cpu().detach()
+                            output_text = self.preprocess.decode(out_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                    
+                            pred_tokens = self._parse_qwen_output(output_text)
+                            gt_tokens = target_seq
+                    
+                            del inputs, generated_ids, out_ids, image_inputs
+                            torch.cuda.empty_cache()
+                    
+                        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                            if "out of memory" in str(e).lower():
+                                if verbose:
+                                    print(f"\nOOM on pair, skipping... (domain={domain})")
+                                continue
+                            else:
+                                raise e
+                    else:
+                        raise ValueError(f"Unknown model_type: {self.model_type}")
+
+                    pred_canonical = canonicalize_sequence(pred_tokens)
+                    gt_canonical = canonicalize_sequence(gt_tokens)
+                    intersection = len(pred_canonical & gt_canonical)
+                    union = len(pred_canonical | gt_canonical)
+
+                    total_intersection += intersection
+                    total_union += union
+                    domain_stats[domain]["intersection"] += intersection
+                    domain_stats[domain]["union"] += union
+                    domain_stats[domain]["count"] += 1
+                    count += 1
+
+        macro_jaccard = total_intersection / total_union if total_union > 0 else 0.0
+        domain_results = {}
+        for domain, stats in domain_stats.items():
+            jaccard = stats["intersection"] / stats["union"] if stats["union"] > 0 else 0.0
+            domain_results[domain] = {"jaccard": jaccard, "count": stats["count"]}
+
+        results = {
+            "overall": {"jaccard": macro_jaccard, "count": count},
+            "per_domain": domain_results
+        }
+
+        output_path_obj = Path(output_path)
+        output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+        all_data = {}
+        if output_path_obj.exists():
+            with open(output_path_obj, "r", encoding="utf-8") as f:
+                try:
+                    all_data = json.load(f)
+                except json.JSONDecodeError:
+                    pass
+
+        metadata = {
+            "dataset": "DomainNet",
+            "split": "val",
+            "transform_prob": self.transform_prob,
+            "total_samples": count,
+            "domains": list(domain_results.keys()),
+            "metrics": ["jaccard"]
+        }
+
+        all_data[model_name] = {"metadata": metadata, "results": results}
+        with open(output_path_obj, "w", encoding="utf-8") as f:
+            json.dump(all_data, f, indent=2, ensure_ascii=False)
+
+        if verbose:
+            print(f"\nDomainNet full validation benchmark completed for '{model_name}'")
+            print(f"   Transform probability (p): {self.transform_prob}")
+            print(f"   Overall Jaccard = {macro_jaccard:.4f} (N={count})")
+            print("\nPer-domain results:")
+            for domain, res in domain_results.items():
+                print(f"   {domain}: Jaccard = {res['jaccard']:.4f} (N={res['count']})")
+            print(f"\nSaved to: {output_path}")
+
         return results

@@ -10,21 +10,21 @@ from .tokenizer import TransformTokenizer
 from .augmentation import ImageTransformer, AugmentationScheduler
 
 
-def _default_image_preprocessor() -> Callable[[Image.Image], torch.Tensor]:
-    """Default image preprocessor: resize to 224x224 + ImageNet normalization."""
-    return transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
 # def _default_image_preprocessor() -> Callable[[Image.Image], torch.Tensor]:
-#     """Default image preprocessor: resize to 300x300 + ImageNet normalization."""
+#     """Default image preprocessor: resize to 224x224 + ImageNet normalization."""
 #     return transforms.Compose([
-#         transforms.Resize((300, 300)),
+#         transforms.Resize((224, 224)),
 #         transforms.ToTensor(),
 #         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 #     ])
+
+def _default_image_preprocessor() -> Callable[[Image.Image], torch.Tensor]:
+    """Default image preprocessor: resize to 300x300 + ImageNet normalization."""
+    return transforms.Compose([
+        transforms.Resize((300, 300)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
 
 class DomainNetDataset(Dataset):
@@ -48,6 +48,7 @@ class DomainNetDataset(Dataset):
         random_seed: int = 42,
         max_seq_len: int = 15,
         augmentation_scheduler: Optional[AugmentationScheduler] = None,
+        return_seq: bool = True
     ):
         if split not in ("train", "val"):
             raise ValueError("split must be 'train' or 'val'!")
@@ -59,6 +60,7 @@ class DomainNetDataset(Dataset):
         self.split = split
         self.max_seq_len = max_seq_len
         self.augmentation_scheduler = augmentation_scheduler
+        self.return_seq=return_seq
 
         domain_to_paths: Dict[str, List[str]] = {}
         for domain in sorted(os.listdir(data_dir)):
@@ -100,15 +102,17 @@ class DomainNetDataset(Dataset):
 
         original_tensor = self.preprocessor(original_image)
         transformed_tensor = self.preprocessor(transformed_image.convert("RGB"))
-
-        sequence_ids = self.tokenizer.encode(
-            transforms=transform_sequence,
-            add_special_tokens=True,
-            max_seq_len=self.max_seq_len,
-            return_targets=False,
-        )
-
-        return original_tensor, transformed_tensor, sequence_ids
+        if self.return_seq:
+            sequence_ids = self.tokenizer.encode(
+                transforms=transform_sequence,
+                add_special_tokens=True,
+                max_seq_len=self.max_seq_len,
+                return_targets=False,
+            )
+            
+            return original_tensor, transformed_tensor, sequence_ids
+        else:
+            return original_tensor, transformed_tensor
 
 
 def get_domainnet_dataloaders(
@@ -122,6 +126,7 @@ def get_domainnet_dataloaders(
     random_seed: int = 42,
     max_seq_len: int = 15,
     augmentation_scheduler: Optional[AugmentationScheduler] = None,
+    return_seq: bool = True
 ):
     common_kwargs = dict(
         data_dir=data_dir,
@@ -132,6 +137,7 @@ def get_domainnet_dataloaders(
         random_seed=random_seed,
         max_seq_len=max_seq_len,
         augmentation_scheduler=augmentation_scheduler,
+        return_seq=return_seq
     )
 
     train_dataset = DomainNetDataset(split="train", **common_kwargs)
@@ -158,19 +164,6 @@ def get_domainnet_dataloaders(
 
 
 class SimpleDomainNetDataset(Dataset):
-    """
-    A simplified DomainNet dataset that returns:
-    - PIL images (without preprocessing),
-    - class labels for each image,
-    - and stores the domain distribution.
-
-    Args:
-        data_dir (str): Path to the directory containing DomainNet images.
-        split (str): Dataset split, either "train" or "val". Default: "train".
-        val_size (float): Fraction of data to use for validation. Default: 0.1.
-        random_seed (int): Random seed for reproducibility. Default: 42.
-    """
-
     def __init__(
         self,
         data_dir: str,
@@ -183,78 +176,48 @@ class SimpleDomainNetDataset(Dataset):
 
         self.data_dir = data_dir
         self.split = split
-        self.domain_distribution: Dict[str, int] = {}  # Stores domain-wise image counts
-
-        # Collect image paths and labels
-        self.image_paths: List[Tuple[str, int]] = []
-        self._collect_images_and_labels(val_size, random_seed)
-
-        # Calculate domain distribution
+        self.domain_distribution: Dict[str, int] = {}
+        self.image_paths: List[Tuple[str, str]] = []
+        self._collect_images_and_domains(val_size, random_seed)
         self._calculate_domain_distribution()
 
-    def _collect_images_and_labels(self, val_size: float, random_seed: int) -> None:
-        """
-        Collects image paths and their corresponding labels.
-
-        Args:
-            val_size (float): Fraction of data to use for validation.
-            random_seed (int): Random seed for reproducibility.
-        """
-        domain_to_paths: Dict[str, List[Tuple[str, int]]] = {}
+    def _collect_images_and_domains(self, val_size: float, random_seed: int) -> None:
+        domain_to_paths: Dict[str, List[Tuple[str, str]]] = {}
         rng = random.Random(random_seed)
 
-        # Iterate over each domain directory
         for domain in sorted(os.listdir(self.data_dir)):
             domain_path = os.path.join(self.data_dir, domain)
             if not os.path.isdir(domain_path):
                 continue
 
-            # Collect all image paths and labels for the domain
-            paths_with_labels = []
+            paths_with_domains = []
             for file in os.listdir(domain_path):
                 if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    # Extract label from filename or metadata (replace with actual logic)
-                    # Example: If label is part of the filename or loaded from JSON
-                    label = 0  # Replace with actual label extraction logic
-                    paths_with_labels.append((os.path.join(domain_path, file), label))
+                    paths_with_domains.append((os.path.join(domain_path, file), domain))
 
-            if paths_with_labels:
-                domain_to_paths[domain] = paths_with_labels
+            if paths_with_domains:
+                domain_to_paths[domain] = paths_with_domains
 
-        # Split into train/val
         for domain, paths in domain_to_paths.items():
             shuffled = rng.sample(paths, len(paths))
             n_val = int(len(shuffled) * val_size)
 
             if self.split == "val":
                 self.image_paths.extend(shuffled[:n_val])
-            else:  # train
+            else:
                 self.image_paths.extend(shuffled[n_val:])
 
-        # Shuffle train split
         if self.split == "train":
             self.image_paths = rng.sample(self.image_paths, len(self.image_paths))
 
     def _calculate_domain_distribution(self) -> None:
-        """Calculates and stores the domain-wise distribution of images."""
-        for path, _ in self.image_paths:
-            domain = os.path.basename(os.path.dirname(path))
+        for _, domain in self.image_paths:
             self.domain_distribution[domain] = self.domain_distribution.get(domain, 0) + 1
 
     def __len__(self) -> int:
-        """Returns the number of images in the dataset."""
         return len(self.image_paths)
 
-    def __getitem__(self, idx: int) -> Tuple[Image.Image, int]:
-        """
-        Returns a PIL image and its label.
-
-        Args:
-            idx (int): Index of the image.
-
-        Returns:
-            Tuple[Image.Image, int]: PIL image and its class label.
-        """
-        image_path, label = self.image_paths[idx]
+    def __getitem__(self, idx: int) -> Tuple[Image.Image, str]:
+        image_path, domain = self.image_paths[idx]
         image = Image.open(image_path).convert("RGB")
-        return image, label
+        return image, domain

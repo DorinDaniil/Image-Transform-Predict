@@ -107,14 +107,14 @@ class DomainRecallEvaluator:
     ) -> Dict[str, Dict[str, float]]:
         self._set_seed()
         results: Dict[str, Dict[str, float]] = {}
-        for domain in tqdm(sorted(self.domain_to_val_paths.keys()), desc="Domains"):
+        for domain in sorted(self.domain_to_val_paths.keys()):
             paths = self.domain_to_val_paths[domain]
             if not paths:
                 continue
             n = min(n_samples, len(paths))
             sampled_paths = random.sample(paths, n)
             aug_scores: Dict[str, List[float]] = {}
-            for p in sampled_paths:
+            for p in tqdm(sampled_paths, desc=f"Recall: {domain}", leave=False):
                 orig = None
                 try:
                     orig = Image.open(p).convert("RGB")
@@ -122,12 +122,13 @@ class DomainRecallEvaluator:
                     for aug_name, aug_img in aug_list:
                         score = 0.0
                         try:
-                            if self.preprocess is not None:
-                                orig_proc = self.preprocess(orig)
-                                aug_proc = self.preprocess(aug_img)
-                                raw_score = self.sim_fn(orig_proc, aug_proc)
-                            else:
-                                raw_score = self.sim_fn(orig, aug_img)
+                            with torch.inference_mode():
+                                if self.preprocess is not None:
+                                    orig_proc = self.preprocess(orig)
+                                    aug_proc = self.preprocess(aug_img)
+                                    raw_score = self.sim_fn(orig_proc, aug_proc)
+                                else:
+                                    raw_score = self.sim_fn(orig, aug_img)
                             if torch.is_tensor(raw_score):
                                 score = raw_score.detach().cpu().item()
                             else:
@@ -137,7 +138,7 @@ class DomainRecallEvaluator:
                         aug_scores.setdefault(aug_name, []).append(score)
                         del aug_img
                     del orig
-                except Exception:
+                except Exception as e:
                     if orig is not None:
                         del orig
                     continue
@@ -172,7 +173,6 @@ class DomainRecallEvaluator:
         if verbose:
             print(f"\nSaved domain recall for '{model_name}' to '{output_path}'")
         return results
-
 
 class DomainFprEvaluator:
     def __init__(
