@@ -155,8 +155,8 @@ def train_model(model, train_loader, val_loader, config, resume=False):
             loss = torch.nn.functional.binary_cross_entropy(probabilities, labels, weight=weight)
 
             if config['training']['contrastive_regularizer']:
-                embs1 = model.encoder(batch1)
-                embs2 = model.encoder(batch2)
+                embs1 = model.encode(batch1)
+                embs2 = model.encode(batch2)
             
                 # Расширяем до всех пар (batch_size ** 2)
                 embs1_all = embs1.unsqueeze(1).expand(batch_size, batch_size, -1).reshape(-1, embs1.size(-1))
@@ -209,8 +209,8 @@ def train_model(model, train_loader, val_loader, config, resume=False):
                 loss = torch.nn.functional.binary_cross_entropy(probabilities, labels, weight=weight)
 
                 if config['training']['contrastive_regularizer']:
-                    embs1 = model.encoder(batch1)
-                    embs2 = model.encoder(batch2)
+                    embs1 = model.extractor(batch1)
+                    embs2 = model.extractor(batch2)
                 
                     # Расширяем до всех пар (batch_size ** 2)
                     embs1_all = embs1.unsqueeze(1).expand(batch_size, batch_size, -1).reshape(-1, embs1.size(-1))

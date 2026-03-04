@@ -4,19 +4,26 @@ experiment:
 training:
   start_epoch: 0
   num_epochs: 50
-  batch_size: 32
+  # batch_size: 16
+  batch_size: 16
   device: 'cuda'
   num_workers: 2
   checkpoint_interval: 1
+  # checkpoint_dir: '/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/siamnet_tune'
   checkpoint_dir: '/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/siamnet_pretrain'
   contrastive_regularizer: True
 
+# model:
+#   initialization_weights_path: "/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/siamnet_pretrain/model_weights.pth"
+
 data:
+  # tensorboard_logdir: '/mnt/DATA2/dorin/Image-Transform-Predict/logs/siamnet_tune'
   tensorboard_logdir: '/mnt/DATA2/dorin/Image-Transform-Predict/logs/siamnet_pretrain'
 
 optimizer:
   name: 'AdamW'  # 'Adam' or 'AdamW'
-  lr: 0.001
+  # lr: 0.001
+  lr: 0.0001
   weight_decay: 0.01
   betas: [0.9, 0.999]
 

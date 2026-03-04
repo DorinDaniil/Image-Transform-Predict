@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
-from src.dataset import ImageTransformer
-from src.dataset import TransformTokenizer
+from src.dataset import TransformTokenizer, AugmentationScheduler, ImageTransformer
 from src.dataset import get_domainnet_dataloaders
 from src.model import SiamNet
 from src.train_siamnet import train_model
