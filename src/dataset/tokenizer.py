@@ -16,7 +16,7 @@ TRANSFORM_TOKENS = {
     "crop": 10,
     "horizontal_flip": 11,
     "vertical_flip": 12,
-    "jpeg_artefacts": 13,
+    # "jpeg_artefacts": 13,
 }
 
 ID_TO_TOKEN = {v: k for k, v in TRANSFORM_TOKENS.items()}

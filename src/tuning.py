@@ -221,7 +221,7 @@ def train_model(
             optimizer.zero_grad()
 
             # Extract features:
-            f1, f2 = model.encode(img1)
+            f1, f2 = model.extract_image_embeddings(img1, img2)
             f1a, f2a = model.extract_image_embeddings(img1_aug, img2_aug)
 
             # Stack for 5B pairs: (img1,img2), (img1,img2_aug), (img2,img1_aug), (img1,img1_aug), (img2,img2_aug)

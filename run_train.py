@@ -4,12 +4,12 @@ from src.dataset import ImageTransformer, AugmentationScheduler
 from src.dataset import TransformTokenizer
 from src.dataset import get_domainnet_dataloaders
 from src.model import ImageTransformPredictor
-from src.train import train_model
+from src.train_complex import train_model
 from omegaconf import OmegaConf
 
 
 def main(data_path):
-    config_path = "configs/train_config_011.yaml"
+    config_path = "configs/train_config_011_complex.yaml"
     train_config = OmegaConf.load(config_path)
 
     model = ImageTransformPredictor(train_config.model)
@@ -45,7 +45,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--data_path',
         type=str,
-        default="/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/data",
+        default="/mnt/DATA2/dorin/Image-Transform-Predict/data",
         help='Full path to the dataset directory'
     )
     args = parser.parse_args()

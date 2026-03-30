@@ -208,6 +208,8 @@ __marimo__/
 
 
 data/
+data_clean/
 logs/
+metrics/
 checkpoints/
 *.json

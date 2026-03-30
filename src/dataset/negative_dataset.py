@@ -15,21 +15,21 @@ from .augmentation import ImageTransformer
 # ==============================================================================
 # Preprocessors
 # ==============================================================================
-# def _default_image_preprocessor() -> Callable[[Image.Image], torch.Tensor]:
-#     """Default image preprocessor: resize to 224x224 + ImageNet normalization."""
-#     return transforms.Compose([
-#         transforms.Resize((224, 224)),
-#         transforms.ToTensor(),
-#         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-#     ])
-
 def _default_image_preprocessor() -> Callable[[Image.Image], torch.Tensor]:
-    """Alternative: resize to 300x300 + ImageNet normalization."""
+    """Default image preprocessor: resize to 224x224 + ImageNet normalization."""
     return transforms.Compose([
-        transforms.Resize((300, 300)),
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
+
+# def _default_image_preprocessor() -> Callable[[Image.Image], torch.Tensor]:
+#     """Alternative: resize to 300x300 + ImageNet normalization."""
+#     return transforms.Compose([
+#         transforms.Resize((300, 300)),
+#         transforms.ToTensor(),
+#         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+#     ])
 
 
 # ==============================================================================
