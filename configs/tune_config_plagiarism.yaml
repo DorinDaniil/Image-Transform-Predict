@@ -1,0 +1,79 @@
+training:
+  start_epoch: 0
+  resume: True
+  num_epochs: 20
+  batch_size: 16
+  num_workers: 4
+  device: 'cuda:0'
+  checkpoint_interval: 1
+  checkpoint_dir: '/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/itp_plagiarism_tune'
+  val_size: 0.05
+  random_seed: 42
+
+  # Tuning focuses on the hard-case binary signal. BCE gets larger weight here.
+  # total = w_seq * seq_CE + w_bce * BCE + w_nce * InfoNCE
+  loss_weights:
+    seq: 1.0
+    bce: 1.5
+    info_nce: 0.3
+
+  info_nce_temperature: 0.07
+  binary_threshold: 0.5
+
+  # In the 10*B structure there are 8B negatives and 2B positives -> ratio 4:1.
+  # BCEWithLogits pos_weight=4.0 balances the per-sample gradient.
+  bce_pos_weight: 4.0
+
+
+data:
+  tensorboard_logdir: '/mnt/DATA2/dorin/Image-Transform-Predict/logs/itp_plagiarism_tune'
+
+
+model:
+  model_name: 'itp_plagiarism_tune'
+  # Point this at the pretrained checkpoint produced by run_train_plagiarism.py.
+  initialization_weights_path: '/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/itp_plagiarism_pretrain/model_weights.pth'
+
+  encoder:
+    type: 'effnet_plagiarism'
+    freeze_image_encoder: False
+    out_token_n_embd: 512
+    n_fused_tokens: 4
+    fuser_dropout: 0.1
+
+  decoder:
+    pos_encoding: 'learned'
+    rope_base: null
+    activation: 'gelu'
+    n_embd: 512
+    ffn_ratio: 4
+    n_head: 8
+    n_layer: 3
+    max_seq_len: 15
+    dropout: 0.1
+    bias: False
+    bos_token_id: 1
+    eos_token_id: 2
+    pad_token_id: 0
+    vocab_size: 13
+
+  match_head:
+    hidden_dim: 512
+    dropout: 0.1
+
+  projection_head:
+    hidden_dim: 512
+    out_dim: 128
+
+
+optimizer:
+  name: 'AdamW'
+  # Lower LR for fine-tuning (~3x smaller than pretrain).
+  lr: 0.0001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+
+
+scheduler:
+  milestones: [3, 6, 10, 14]
+  gamma: 0.5

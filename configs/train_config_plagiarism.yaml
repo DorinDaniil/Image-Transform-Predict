@@ -1,0 +1,83 @@
+training:
+  start_epoch: 0
+  resume: True
+  num_epochs: 30
+  batch_size: 16
+  num_workers: 4
+  device: 'cuda:0'
+  checkpoint_interval: 1
+  checkpoint_dir: '/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/itp_plagiarism_pretrain'
+  val_size: 0.1
+  random_seed: 42
+
+  # Loss composition: total = w_seq * seq_CE + w_bce * BCE + w_nce * InfoNCE
+  loss_weights:
+    seq: 1.0
+    bce: 0.5
+    info_nce: 0.2
+
+  info_nce_temperature: 0.07
+  binary_threshold: 0.5
+
+  # For pretraining the batch is BxB; positives = B, negatives = B*(B-1).
+  # BCEWithLogits pos_weight helps rebalance when B is small.
+  bce_pos_weight: 15.0
+
+
+data:
+  tensorboard_logdir: '/mnt/DATA2/dorin/Image-Transform-Predict/logs/itp_plagiarism_pretrain'
+
+
+model:
+  model_name: 'itp_plagiarism_pretrain'
+  # Leave null for from-scratch pretraining; or point to EffNet-based checkpoint for warm-start.
+  initialization_weights_path: null
+
+  encoder:
+    type: 'effnet_plagiarism'
+    freeze_image_encoder: False
+    out_token_n_embd: 512
+    n_fused_tokens: 4
+    fuser_dropout: 0.1
+
+  decoder:
+    pos_encoding: 'learned'
+    rope_base: null
+    activation: 'gelu'
+    n_embd: 512
+    ffn_ratio: 4
+    n_head: 8
+    n_layer: 3
+    max_seq_len: 15
+    dropout: 0.1
+    bias: False
+    bos_token_id: 1
+    eos_token_id: 2
+    pad_token_id: 0
+    vocab_size: 13
+
+  match_head:
+    hidden_dim: 512
+    dropout: 0.1
+
+  projection_head:
+    hidden_dim: 512
+    out_dim: 128
+
+
+optimizer:
+  name: 'AdamW'
+  lr: 0.0003
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+
+
+scheduler:
+  milestones: [5, 10, 15, 20]
+  gamma: 0.5
+
+
+augmentation:
+  initial_p: 0.3
+  milestones: [5, 15]
+  probs: [0.4, 0.5]
