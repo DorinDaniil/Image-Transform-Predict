@@ -12,7 +12,14 @@ def main(data_path):
     config_path = "configs/train_config_011_complex.yaml"
     train_config = OmegaConf.load(config_path)
 
+    # Initialize model
     model = ImageTransformPredictor(train_config.model)
+    init_weights = train_config.model.get('initialization_weights_path')
+    if init_weights is not None:
+        print(f"Loading pretrained weights from: {init_weights}")
+        state_dict = torch.load(init_weights, map_location='cpu', weights_only=True)
+        model.load_state_dict(state_dict)
+
     tokenizer = TransformTokenizer()
     transformer = ImageTransformer()
 
