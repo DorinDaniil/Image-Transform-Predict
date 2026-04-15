@@ -84,6 +84,86 @@ def pairwise_bce_loss(
     )
 
 
+class SeqTokenAccuracy:
+    """Epoch-level macro-averaged per-token accuracy (PAD tokens excluded)."""
+
+    def __init__(self, pad_token_id: int) -> None:
+        self.pad_token_id = pad_token_id
+        self.reset()
+
+    def reset(self) -> None:
+        self.total_correct = 0
+        self.total_tokens = 0
+
+    def update(
+        self, seq_logits: torch.Tensor, idx: torch.Tensor,
+    ) -> None:
+        """
+        Args:
+            seq_logits: [N, T, V] decoder output logits.
+            idx: [N, T] teacher-forced input (BOS, tok1, tok2, ...).
+        """
+        targets = torch.roll(idx, shifts=-1, dims=1)
+        targets[:, -1] = self.pad_token_id
+        preds = seq_logits.detach().argmax(dim=-1)  # [N, T]
+        mask = targets != self.pad_token_id
+        self.total_correct += int((preds[mask] == targets[mask]).sum())
+        self.total_tokens += int(mask.sum())
+
+    @property
+    def accuracy(self) -> float:
+        return self.total_correct / self.total_tokens if self.total_tokens > 0 else 0.0
+
+
+class SeqBinaryMetrics:
+    """Binary classification derived from the decoder's first predicted token.
+
+    Rule: if argmax(logits at position 0) == eos_token_id the decoder
+    predicts "no transform" → class 0.  Otherwise → class 1.
+    Accumulates TP/FP/FN/TN the same way as BinaryMatchMetrics.
+    """
+
+    def __init__(self, eos_token_id: int) -> None:
+        self.eos_token_id = eos_token_id
+        self.reset()
+
+    def reset(self) -> None:
+        self.tp = 0
+        self.fp = 0
+        self.fn = 0
+        self.tn = 0
+
+    def update(self, seq_logits: torch.Tensor, labels: torch.Tensor) -> None:
+        first_pred = seq_logits.detach()[:, 0, :].argmax(dim=-1)  # [N]
+        preds = (first_pred != self.eos_token_id).long()
+        labels = labels.detach().cpu().long()
+        preds = preds.cpu()
+        self.tp += int(((preds == 1) & (labels == 1)).sum())
+        self.fp += int(((preds == 1) & (labels == 0)).sum())
+        self.fn += int(((preds == 0) & (labels == 1)).sum())
+        self.tn += int(((preds == 0) & (labels == 0)).sum())
+
+    @property
+    def precision(self) -> float:
+        d = self.tp + self.fp
+        return self.tp / d if d > 0 else 0.0
+
+    @property
+    def recall(self) -> float:
+        d = self.tp + self.fn
+        return self.tp / d if d > 0 else 0.0
+
+    @property
+    def f1(self) -> float:
+        p, r = self.precision, self.recall
+        return 2 * p * r / (p + r) if p + r > 0 else 0.0
+
+    @property
+    def fpr(self) -> float:
+        d = self.fp + self.tn
+        return self.fp / d if d > 0 else 0.0
+
+
 class BinaryMatchMetrics:
     """
     Epoch-level metrics using a CALIBRATED probability threshold on match_logit.

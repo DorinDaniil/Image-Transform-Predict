@@ -1,12 +1,12 @@
 training:
   start_epoch: 0
   resume: True
-  num_epochs: 30
-  batch_size: 16
+  num_epochs: 50
+  batch_size: 32
   num_workers: 4
   device: 'cuda:0'
   checkpoint_interval: 1
-  checkpoint_dir: '/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/itp_plagiarism_pretrain'
+  checkpoint_dir: '/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/checkpoints/itp_plagiarism_pretrain'
   val_size: 0.1
   random_seed: 42
 
@@ -19,13 +19,18 @@ training:
   info_nce_temperature: 0.07
   binary_threshold: 0.5
 
-  # For pretraining the batch is BxB; positives = B, negatives = B*(B-1).
-  # BCEWithLogits pos_weight helps rebalance when B is small.
-  bce_pos_weight: 15.0
+  # Symmetric negatives: add mirror pairs (aug_j, orig_i) for all i != j.
+  # Doubles negatives: B pos vs 2*B*(B-1) neg.
+  symmetric_negatives: true
+
+  # For pretraining the batch is BxB; with symmetric_negatives the ratio is
+  # B : 2*B*(B-1) = 1:30 for B=16.  Balanced pos_weight would be ~30.
+  # We intentionally under-compensate (1.0) to bias toward low FPR.
+  bce_pos_weight: 1.0
 
 
 data:
-  tensorboard_logdir: '/mnt/DATA2/dorin/Image-Transform-Predict/logs/itp_plagiarism_pretrain'
+  tensorboard_logdir: '/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/logs/itp_plagiarism_pretrain'
 
 
 model:
@@ -67,17 +72,17 @@ model:
 
 optimizer:
   name: 'AdamW'
-  lr: 0.0003
+  lr: 0.001
   weight_decay: 0.01
   betas: [0.9, 0.999]
 
 
 scheduler:
   milestones: [5, 10, 15, 20]
-  gamma: 0.5
+  gamma: 0.7
 
 
 augmentation:
   initial_p: 0.3
-  milestones: [5, 15]
-  probs: [0.4, 0.5]
+  milestones: []
+  probs: []

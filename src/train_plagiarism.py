@@ -24,6 +24,8 @@ from tqdm import tqdm
 
 from .model.effnet_plagiarism import (
     BinaryMatchMetrics,
+    SeqBinaryMetrics,
+    SeqTokenAccuracy,
     info_nce_loss,
     pairwise_bce_loss,
 )
@@ -138,6 +140,12 @@ def train_model(
     info_nce_temperature = float(config["training"].get("info_nce_temperature", 0.07))
     binary_threshold = float(config["training"].get("binary_threshold", 0.5))
 
+    # Symmetric negatives: if True, also include mirror negative pairs (aug_j, orig_i)
+    # for every forward negative (orig_i, aug_j), so the fuser+decoder learn an
+    # order-invariant decision boundary. Positives stay forward-only because we do
+    # NOT have ground-truth inverse transform sequences for (aug -> orig) direction.
+    symmetric_negatives = bool(config["training"].get("symmetric_negatives", False))
+
     bce_pos_weight_scalar = config["training"].get("bce_pos_weight", None)
     bce_pos_weight = (
         torch.tensor([float(bce_pos_weight_scalar)], device=device)
@@ -192,6 +200,7 @@ def train_model(
             binary_threshold=binary_threshold,
             mode="train",
             desc=f"Train Epoch {epoch + 1}",
+            symmetric_negatives=symmetric_negatives,
         )
 
         lr_scheduler.step()
@@ -216,6 +225,7 @@ def train_model(
                 binary_threshold=binary_threshold,
                 mode="val",
                 desc=f"Val   Epoch {epoch + 1}",
+                symmetric_negatives=symmetric_negatives,
             )
 
         current_lr = optimizer.param_groups[0]["lr"]
@@ -229,12 +239,22 @@ def train_model(
             f"| F1 {train_stats['f1']:.4f} | FPR {train_stats['fpr']:.4f}"
         )
         print(
+            f"  Train TokAcc {train_stats['tok_acc']:.4f} | SeqPrec {train_stats['seq_precision']:.4f} "
+            f"| SeqRec {train_stats['seq_recall']:.4f} | SeqF1 {train_stats['seq_f1']:.4f} "
+            f"| SeqFPR {train_stats['seq_fpr']:.4f}"
+        )
+        print(
             f"  Val   Total {val_stats['total']:.4f} | Seq {val_stats['seq']:.4f} "
             f"| BCE {val_stats['bce']:.4f} | NCE {val_stats['nce']:.4f}"
         )
         print(
             f"  Val   Prec {val_stats['precision']:.4f} | Recall {val_stats['recall']:.4f} "
             f"| F1 {val_stats['f1']:.4f} | FPR {val_stats['fpr']:.4f}"
+        )
+        print(
+            f"  Val   TokAcc {val_stats['tok_acc']:.4f} | SeqPrec {val_stats['seq_precision']:.4f} "
+            f"| SeqRec {val_stats['seq_recall']:.4f} | SeqF1 {val_stats['seq_f1']:.4f} "
+            f"| SeqFPR {val_stats['seq_fpr']:.4f}"
         )
         print(f"  LR {current_lr:.2e} | aug_p {current_aug_p:.3f}")
 
@@ -247,6 +267,11 @@ def train_model(
             writer.add_scalar(f"Binary/{split}/Recall", s["recall"], epoch)
             writer.add_scalar(f"Binary/{split}/F1", s["f1"], epoch)
             writer.add_scalar(f"Binary/{split}/FPR", s["fpr"], epoch)
+            writer.add_scalar(f"Seq/{split}/TokenAccuracy", s["tok_acc"], epoch)
+            writer.add_scalar(f"Seq/{split}/Precision", s["seq_precision"], epoch)
+            writer.add_scalar(f"Seq/{split}/Recall", s["seq_recall"], epoch)
+            writer.add_scalar(f"Seq/{split}/F1", s["seq_f1"], epoch)
+            writer.add_scalar(f"Seq/{split}/FPR", s["seq_fpr"], epoch)
 
         writer.add_scalar("LearningRate", current_lr, epoch)
         writer.add_scalar("Augmentation/p", current_aug_p, epoch)
@@ -277,11 +302,14 @@ def _run_epoch(
     binary_threshold,
     mode,
     desc,
+    symmetric_negatives: bool = False,
 ) -> Dict[str, float]:
     is_train = mode == "train"
     total_sum = seq_sum = bce_sum = nce_sum = 0.0
     total_pairs = 0
     metrics = BinaryMatchMetrics(threshold=binary_threshold)
+    seq_acc = SeqTokenAccuracy(pad_token_id=pad_token_id)
+    seq_bin = SeqBinaryMetrics(eos_token_id=eos_token_id)
 
     for orig_batch, aug_batch, idx_batch in tqdm(loader, desc=desc):
         B = orig_batch.size(0)
@@ -320,6 +348,19 @@ def _run_epoch(
         target_classes = torch.zeros(B * B, dtype=torch.long, device=device)
         target_classes[diag] = 1
 
+        # -------- Symmetric negatives: mirror (aug_j, orig_i) for i != j --------
+        if symmetric_negatives:
+            sym_orig_base = orig_all[off]   # [B*(B-1), L, D_enc]
+            sym_aug_base = aug_all[off]     # [B*(B-1), L, D_enc]
+
+            orig_all = torch.cat([orig_all, sym_aug_base], dim=0)
+            aug_all = torch.cat([aug_all, sym_orig_base], dim=0)
+            full_idx = torch.cat([full_idx, neg_idx], dim=0)
+            target_classes = torch.cat(
+                [target_classes, torch.zeros(B * (B - 1), dtype=torch.long, device=device)],
+                dim=0,
+            )
+
         # -------- Forward --------
         seq_logits, seq_loss, match_logits, _fused = model(
             orig_all,
@@ -353,8 +394,10 @@ def _run_epoch(
 
         # Metrics
         metrics.update(match_logits.detach(), target_classes.detach())
+        seq_acc.update(seq_logits.detach(), full_idx)
+        seq_bin.update(seq_logits.detach(), target_classes)
 
-        n_pairs = B * B
+        n_pairs = orig_all.size(0)
         total_sum += float(total_loss.item()) * n_pairs
         seq_sum += float(seq_loss.item()) * n_pairs
         bce_sum += float(bce.item()) * n_pairs
@@ -370,4 +413,9 @@ def _run_epoch(
         "recall": metrics.recall,
         "f1": metrics.f1,
         "fpr": metrics.fpr,
+        "tok_acc": seq_acc.accuracy,
+        "seq_precision": seq_bin.precision,
+        "seq_recall": seq_bin.recall,
+        "seq_f1": seq_bin.f1,
+        "seq_fpr": seq_bin.fpr,
     }

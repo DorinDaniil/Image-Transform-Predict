@@ -7,7 +7,9 @@ Public API:
     ImagePairEncoderPlagiarism  -- encoder + fuser.
     BinaryMatchHead             -- explicit binary classification head.
     ProjectionHead              -- small MLP for InfoNCE over raw features.
-    BinaryMatchMetrics          -- precision/recall/F1/FPR tracker.
+    BinaryMatchMetrics          -- precision/recall/F1/FPR tracker (match head).
+    SeqTokenAccuracy            -- per-token accuracy tracker (decoder).
+    SeqBinaryMetrics            -- precision/recall/F1/FPR from first decoded token.
     ImageTransformPlagiarismPredictor -- end-to-end model.
     info_nce_loss, pairwise_bce_loss -- loss helpers.
 """
@@ -23,6 +25,8 @@ from .losses import (
     info_nce_loss,
     pairwise_bce_loss,
     BinaryMatchMetrics,
+    SeqTokenAccuracy,
+    SeqBinaryMetrics,
 )
 from .model import ImageTransformPlagiarismPredictor
 
@@ -35,5 +39,7 @@ __all__ = [
     "info_nce_loss",
     "pairwise_bce_loss",
     "BinaryMatchMetrics",
+    "SeqTokenAccuracy",
+    "SeqBinaryMetrics",
     "ImageTransformPlagiarismPredictor",
 ]
