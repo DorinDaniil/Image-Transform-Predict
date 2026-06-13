@@ -70,8 +70,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '--data_path',
         type=str,
-        default="/mnt/DATA2/dorin/res.cv.science.dataset.generation/datasets",
-        help='Root directory containing batch_X folders with image pairs'
+        default="data/negative_pairs",
+        help='Root directory containing dataset_X folders with image pairs'
     )
     
     parser.add_argument(

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""Fine-tune the EffNet/ViT ImageTransformPredictor on negative image pairs.
+
+Run from the repository root, e.g.:
+    python -m scripts.run_tune --config configs/train_config_effnet.yaml --data_path data/negative_pairs
+"""
 import argparse
 import torch
 from omegaconf import OmegaConf
@@ -12,8 +17,7 @@ from src.model import ImageTransformPredictor
 from src.tuning import train_model
 
 
-def main(data_path):
-    config_path = "configs/train_config_vit.yaml"
+def main(config_path, data_path):
     train_config = OmegaConf.load(config_path)
 
     # Initialize model
@@ -61,12 +65,18 @@ def main(data_path):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train on Negative Image Pairs.')
+    parser = argparse.ArgumentParser(description='Fine-tune Image Transform Predictor on negative image pairs.')
+    parser.add_argument(
+        '--config',
+        type=str,
+        default="configs/train_config_effnet.yaml",
+        help='Path to the model config (e.g. configs/train_config_effnet.yaml or configs/train_config_vit.yaml).'
+    )
     parser.add_argument(
         '--data_path',
         type=str,
-        default="/mnt/DATA2/dorin/res.cv.science.dataset.generation/datasets",
-        help='Root directory containing batch_X folders'
+        default="data/negative_pairs",
+        help='Root directory containing the dataset_X folders with image pairs.'
     )
     args = parser.parse_args()
-    main(args.data_path)
+    main(args.config, args.data_path)

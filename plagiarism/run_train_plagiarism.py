@@ -2,10 +2,10 @@
 """
 Pretraining entry point for ImageTransformPlagiarismPredictor.
 
-Usage:
-    python run_train_plagiarism.py \
-        --config configs/train_config_plagiarism.yaml \
-        --data_path /mnt/DATA2/dorin/Image-Transform-Predict/data
+Run from the repository root:
+    python -m plagiarism.run_train_plagiarism \
+        --config plagiarism/configs/train_config_plagiarism.yaml \
+        --data_path data
 """
 
 import argparse
@@ -13,14 +13,15 @@ import argparse
 import torch
 from omegaconf import OmegaConf
 
+# Shared data pipeline lives in the main package.
 from src.dataset import (
     AugmentationScheduler,
     ImageTransformer,
     TransformTokenizer,
     get_domainnet_dataloaders,
 )
-from src.model.effnet_plagiarism import ImageTransformPlagiarismPredictor
-from src.train_plagiarism import train_model
+from plagiarism.effnet_plagiarism import ImageTransformPlagiarismPredictor
+from plagiarism.train_plagiarism import train_model
 
 
 def main(config_path: str, data_path: str) -> None:
@@ -76,13 +77,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/train_config_plagiarism.yaml",
+        default="plagiarism/configs/train_config_plagiarism.yaml",
         help="Path to OmegaConf yaml.",
     )
     parser.add_argument(
         "--data_path",
         type=str,
-        default="/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/data",
+        default="data",
         help="Root directory with <domain>/*.{jpg,png} subfolders.",
     )
     args = parser.parse_args()

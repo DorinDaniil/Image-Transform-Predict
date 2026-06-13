@@ -1,31 +1,33 @@
-# ViT-based ImageTransformPredictor (paper model).
+# EffNet-based ImageTransformPredictor (paper model).
 #
 # One config, both stages. The active values below target the FINE-TUNE stage on
 # negative pairs (scripts/run_tune.py). To PRETRAIN on DomainNet
 # (scripts/run_train.py), switch to the commented "pretrain" lines.
+#
+# Images are resized to 300x300; no jpeg artifacts.
 
 training:
   start_epoch: 0
-  resume: True
+  resume: False
   num_epochs: 50
-  batch_size: 32
+  batch_size: 16
   device: 'cuda:0'
   checkpoint_interval: 1
   val_size: 0.1
   random_seed: 42
-  checkpoint_dir: 'checkpoints/vit_tune'
-  # checkpoint_dir: 'checkpoints/vit_pretrain'
+  checkpoint_dir: 'checkpoints/effnet_tune'
+  # checkpoint_dir: 'checkpoints/effnet_pretrain'
 
 data:
-  tensorboard_logdir: 'logs/vit_tune'
-  # tensorboard_logdir: 'logs/vit_pretrain'
+  tensorboard_logdir: 'logs/effnet_tune'
+  # tensorboard_logdir: 'logs/effnet_pretrain'
 
 model:
-  model_name: 'vit'
-  initialization_weights_path: 'checkpoints/vit_pretrain/model_weights.pth'
+  model_name: 'effnet'
+  initialization_weights_path: 'checkpoints/effnet_pretrain/model_weights.pth'
   # initialization_weights_path: null   # pretrain from scratch
   encoder:
-    type: 'vit'
+    type: 'efficientnet'
     freeze_image_encoder: False
     out_token_n_embd: 512
   decoder:
@@ -42,7 +44,7 @@ model:
     bos_token_id: 1
     eos_token_id: 2
     pad_token_id: 0
-    vocab_size: 14
+    vocab_size: 13
 
 optimizer:
   name: 'AdamW'
@@ -51,7 +53,7 @@ optimizer:
   betas: [0.9, 0.999]
 
 scheduler:
-  milestones: [20, 40]
+  milestones: [5, 10, 25, 40]
   gamma: 0.5
 
 augmentation:

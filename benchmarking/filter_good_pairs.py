@@ -11,12 +11,9 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-GOOD_PAIRS_PATH = Path(
-    "/mnt/DATA2/dorin/Image-Transform-Predict/data_clean/good_pairs_after_loss_90.json"
-)
-NEGATIVE_META_PATH = Path(
-    "/mnt/DATA2/dorin/Image-Transform-Predict/benchmarking/negative_test_dataset_meta.json"
-)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+GOOD_PAIRS_PATH = _REPO_ROOT / "data_clean" / "good_pairs_after_loss_90.json"
+NEGATIVE_META_PATH = Path(__file__).resolve().parent / "negative_test_dataset_meta.json"
 OUTPUT_PATH = Path(__file__).resolve().parent / "filtered_negative_test_dataset_meta.json"
 
 EXCLUDED_CLASS = "monotone"

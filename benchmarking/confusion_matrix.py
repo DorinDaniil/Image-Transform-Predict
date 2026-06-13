@@ -26,7 +26,7 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-src_path = '/mnt/DATA2/dorin/Image-Transform-Predict/src'
+src_path = str(Path(__file__).resolve().parent.parent / 'src')
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
 

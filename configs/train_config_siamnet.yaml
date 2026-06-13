@@ -1,3 +1,9 @@
+# SiamNet contrastive baseline (paper model).
+#
+# One config, both stages. The active values below target the FINE-TUNE stage on
+# negative pairs (scripts/run_tune_siamnet.py). To PRETRAIN on DomainNet
+# (scripts/run_train_siamnet.py), switch to the commented "pretrain" lines.
+
 experiment:
   experiment_name: 'matching'
 
@@ -8,20 +14,20 @@ training:
   device: 'cuda'
   num_workers: 2
   checkpoint_interval: 1
-  checkpoint_dir: '/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/siamnet_tune'
-  # checkpoint_dir: '/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/siamnet_pretrain'
   contrastive_regularizer: True
+  checkpoint_dir: 'checkpoints/siamnet_tune'
+  # checkpoint_dir: 'checkpoints/siamnet_pretrain'
 
 model:
-  initialization_weights_path: "/mnt/DATA2/dorin/Image-Transform-Predict/checkpoints/siamnet_pretrain/model_weights.pth"
+  initialization_weights_path: 'checkpoints/siamnet_pretrain/model_weights.pth'
+  # initialization_weights_path: null   # pretrain from scratch
 
 data:
-  tensorboard_logdir: '/mnt/DATA2/dorin/Image-Transform-Predict/logs/siamnet_tune'
-  # tensorboard_logdir: '/mnt/DATA2/dorin/Image-Transform-Predict/logs/siamnet_pretrain'
+  tensorboard_logdir: 'logs/siamnet_tune'
+  # tensorboard_logdir: 'logs/siamnet_pretrain'
 
 optimizer:
   name: 'AdamW'  # 'Adam' or 'AdamW'
-  # lr: 0.001
   lr: 0.0001
   weight_decay: 0.01
   betas: [0.9, 0.999]

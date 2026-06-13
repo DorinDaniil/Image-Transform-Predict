@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""Pretrain the SiamNet contrastive baseline on DomainNet.
+
+Run from the repository root, e.g.:
+    python -m scripts.run_train_siamnet --config configs/train_config_siamnet.yaml --data_path data
+"""
 import argparse
 from src.dataset import TransformTokenizer, AugmentationScheduler, ImageTransformer
 from src.dataset import get_domainnet_dataloaders
@@ -7,8 +12,7 @@ from src.train_siamnet import train_model
 from omegaconf import OmegaConf
 
 
-def main(data_path):
-    config_path = "configs/train_config_siamnet.yaml"
+def main(config_path, data_path):
     train_config = OmegaConf.load(config_path)
 
     model = SiamNet()
@@ -37,10 +41,16 @@ def main(data_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train SiamNet.')
     parser.add_argument(
+        '--config',
+        type=str,
+        default="configs/train_config_siamnet.yaml",
+        help='Path to the SiamNet config.'
+    )
+    parser.add_argument(
         '--data_path',
         type=str,
-        default="/mnt/DATA2/dorin/Image-Transform-Predict/data",
-        help='Full path to the dataset directory'
+        default="data",
+        help='Path to the DomainNet dataset directory.'
     )
     args = parser.parse_args()
-    main(args.data_path)
+    main(args.config, args.data_path)

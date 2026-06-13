@@ -6,7 +6,7 @@ training:
   num_workers: 4
   device: 'cuda:0'
   checkpoint_interval: 1
-  checkpoint_dir: '/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/checkpoints/itp_plagiarism_pretrain'
+  checkpoint_dir: 'checkpoints/plagiarism_pretrain'
   val_size: 0.1
   random_seed: 42
 
@@ -30,11 +30,11 @@ training:
 
 
 data:
-  tensorboard_logdir: '/home/jovyan/nkiselev/ddorin/project/Image-Transform-Predict/logs/itp_plagiarism_pretrain'
+  tensorboard_logdir: 'logs/plagiarism_pretrain'
 
 
 model:
-  model_name: 'itp_plagiarism_pretrain'
+  model_name: 'plagiarism_pretrain'
   # Leave null for from-scratch pretraining; or point to EffNet-based checkpoint for warm-start.
   initialization_weights_path: null
 

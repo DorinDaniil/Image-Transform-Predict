@@ -11,14 +11,14 @@ Mapping (training model -> standalone component):
     transform_decoder.*                 ->  decoder  (TransformationDecoder)
     projection_head.*                   ->  (skipped, training-only)
 
-Usage:
+Usage (run from the repository root):
     # CLI: extract from checkpoint -> 4 files
-    python export_plagiarism_weights.py \\
-        --checkpoint checkpoints/itp_plagiarism_pretrain/checkpoint_epoch_30.pth \\
+    python -m plagiarism.export_plagiarism_weights \\
+        --checkpoint checkpoints/plagiarism_pretrain/checkpoint_epoch_30.pth \\
         --output_dir weights/plagiarism/
 
     # Python: load directly into standalone model
-    from model_plagiarism_torch import PlagiarismDetectionModelV2
+    from plagiarism.model_plagiarism_torch import PlagiarismDetectionModelV2
     model = PlagiarismDetectionModelV2()
     model.load_from_full_checkpoint("checkpoints/.../checkpoint_epoch_30.pth")
 """
@@ -126,7 +126,7 @@ def export_components(
 
 def verify_loading(output_dir: str) -> None:
     """Quick verification: load all components into standalone model."""
-    from model_plagiarism_torch import PlagiarismDetectionModelV2
+    from plagiarism.model_plagiarism_torch import PlagiarismDetectionModelV2
 
     model = PlagiarismDetectionModelV2(device="cpu")
     model.load_components(

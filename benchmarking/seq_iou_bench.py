@@ -14,7 +14,7 @@ import hashlib
 from qwen_vl_utils import process_vision_info
 from torch.utils.data import DataLoader
 
-src_path = '/mnt/DATA2/dorin/Image-Transform-Predict/src'
+src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src')
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
 

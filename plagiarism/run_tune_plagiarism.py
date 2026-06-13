@@ -2,10 +2,10 @@
 """
 Tuning entry point for ImageTransformPlagiarismPredictor on hard negatives.
 
-Usage:
-    python run_tune_plagiarism.py \
-        --config configs/tune_config_plagiarism.yaml \
-        --negative-root /mnt/DATA2/dorin/res.cv.science.dataset.generation/datasets \
+Run from the repository root:
+    python -m plagiarism.run_tune_plagiarism \
+        --config plagiarism/configs/tune_config_plagiarism.yaml \
+        --negative-root data/negative_pairs \
         --clean-json data_clean/good_pairs_after_loss_90.json
 """
 
@@ -21,11 +21,10 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
+# Shared data pipeline lives in the main package.
 from src.dataset import ImageTransformer, TransformTokenizer
-from src.model.effnet_plagiarism import ImageTransformPlagiarismPredictor
-from src.tuning_plagiarism import train_model
-
-# python run_tune_plagiarism.py --config configs/tune_config_plagiarism.yaml --negative-root "/mnt/DATA2/dorin/res.cv.science.dataset.generation/datasets" --clean-json "data_clean/good_pairs_after_loss_90.json"
+from plagiarism.effnet_plagiarism import ImageTransformPlagiarismPredictor
+from plagiarism.tuning_plagiarism import train_model
 
 def _default_image_preprocessor():
     return transforms.Compose(

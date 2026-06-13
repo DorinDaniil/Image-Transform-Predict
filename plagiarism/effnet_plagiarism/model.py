@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig
 
-from ..decoder import TransformDecoder
+from src.model.decoder import TransformDecoder
 from .encoder import ImagePairEncoderPlagiarism
 from .head import BinaryMatchHead
 from .losses import ProjectionHead

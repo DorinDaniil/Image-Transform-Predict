@@ -443,7 +443,7 @@ class PlagiarismDetectionModelV2(nn.Module):
         ck = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         sd = ck["model_state_dict"] if "model_state_dict" in ck else ck
 
-        from export_plagiarism_weights import split_state_dict
+        from plagiarism.export_plagiarism_weights import split_state_dict
 
         parts = split_state_dict(sd)
         self.encoder.load_state_dict(parts["encoder"], strict=strict)
