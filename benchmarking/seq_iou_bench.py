@@ -10,6 +10,7 @@ import re
 import sys
 import os
 import ast
+import hashlib
 from qwen_vl_utils import process_vision_info
 from torch.utils.data import DataLoader
 
@@ -100,7 +101,7 @@ class LengthWiseAccuracyBenchmark:
         device: torch.device,
         n_samples_per_length: int = 200,
         max_gen_len: int = 15,
-        seed: int = 2025
+        seed: int = 2026
     ):
         self.model = model
         self.dataset_root = Path(dataset_root)
@@ -151,9 +152,9 @@ class LengthWiseAccuracyBenchmark:
     
         self.model.eval()
         with torch.no_grad():
-            for k in range(1, 6):  # k = 1 to 5
-                n = min(self.n_samples_per_length, len(self.all_image_paths))
-                sampled_paths = random.sample(self.all_image_paths, n)
+            n = min(self.n_samples_per_length, len(self.all_image_paths))
+            sampled_paths = random.sample(self.all_image_paths, n)
+            for k in range(1, 6): # k = 1 to 5
     
                 total_intersection = 0
                 total_union = 0
@@ -273,7 +274,7 @@ class QwenLengthWiseBenchmark:
         json_path: str,
         transformer,
         n_samples_per_length: int = 200,
-        seed: int = 2025
+        seed: int = 2026
     ):
         self.model = model
         self.processor = processor
@@ -345,9 +346,9 @@ class QwenLengthWiseBenchmark:
     
         self.model.eval()
         with torch.no_grad():
-            for k in range(1, 6):  # k = 1 to 5
-                n = min(self.n_samples_per_length, len(self.all_image_paths))
-                sampled_paths = random.sample(self.all_image_paths, n)
+            n = min(self.n_samples_per_length, len(self.all_image_paths))
+            sampled_paths = random.sample(self.all_image_paths, n)
+            for k in range(1, 6): # k = 1 to 5
     
                 total_intersection = 0
                 total_union = 0
@@ -385,7 +386,7 @@ class QwenLengthWiseBenchmark:
                         padding=True,
                         return_tensors="pt",
                     )
-                    inputs = inputs.to("cpu")
+                    inputs = inputs.to("cuda")
     
                     # Inference
                     generated_ids = self.model.generate(**inputs, max_new_tokens=128)
@@ -496,7 +497,7 @@ class DomainNetFullBenchmark:
         )
 
     def _set_image_seed(self, image: Image.Image) -> None:
-        img_hash = hash(image.tobytes()) % (2**32)
+        img_hash = int(hashlib.sha256(image.tobytes()).hexdigest(), 16) % (2**32)
         random.seed(img_hash)
         np.random.seed(img_hash % (2**32))
         torch.manual_seed(img_hash)
