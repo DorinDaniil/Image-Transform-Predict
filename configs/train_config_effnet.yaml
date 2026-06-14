@@ -10,7 +10,7 @@ training:
   start_epoch: 0
   resume: False
   num_epochs: 50
-  batch_size: 16
+  batch_size: 32
   device: 'cuda:0'
   checkpoint_interval: 1
   val_size: 0.1
@@ -44,7 +44,7 @@ model:
     bos_token_id: 1
     eos_token_id: 2
     pad_token_id: 0
-    vocab_size: 13
+    vocab_size: 14
 
 optimizer:
   name: 'AdamW'
