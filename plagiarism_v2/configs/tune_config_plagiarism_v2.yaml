@@ -1,0 +1,114 @@
+training:
+  start_epoch: 0
+  resume: True
+  num_epochs: 20
+  batch_size: 16
+  num_workers: 4
+  device: 'cuda:0'
+  checkpoint_interval: 1
+  checkpoint_dir: 'checkpoints/plagiarism_v2_tune'
+  val_size: 0.05
+  random_seed: 42
+
+  # total = w_seq * seq_CE + w_bce * BCE + w_nce * InfoNCE
+  loss_weights:
+    seq: 1.0
+    bce: 1.5
+    info_nce: 0.3
+
+  info_nce_temperature: 0.07
+  binary_threshold: 0.5
+
+  bce_pos_weight: 0.5
+
+
+data:
+  tensorboard_logdir: 'logs/plagiarism_v2_tune'
+
+
+model:
+  model_name: 'plagiarism_v2_tune'
+  # Point this at the v2 pretrain weights produced by run_train_plagiarism_v2.py.
+  initialization_weights_path: 'checkpoints/plagiarism_v2_pretrain/model_weights.pth'
+
+  encoder:
+    type: 'effnet_plagiarism'
+    freeze_image_encoder: False
+    out_token_n_embd: 512
+    n_fused_tokens: 4
+    fuser_dropout: 0.1
+
+  decoder:
+    pos_encoding: 'learned'
+    rope_base: null
+    activation: 'gelu'
+    n_embd: 512
+    ffn_ratio: 4
+    n_head: 8
+    n_layer: 3
+    max_seq_len: 15
+    dropout: 0.1
+    bias: False
+    bos_token_id: 1
+    eos_token_id: 2
+    pad_token_id: 0
+    vocab_size: 16
+
+  match_head:
+    hidden_dim: 512
+    dropout: 0.1
+
+  projection_head:
+    hidden_dim: 512
+    out_dim: 128
+
+
+optimizer:
+  name: 'AdamW'
+  lr: 0.0001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+
+
+scheduler:
+  milestones: [3, 6, 10, 14]
+  gamma: 0.5
+
+
+augmentation_v2:
+  # Same structure as in train_config_plagiarism_v2.yaml (see comments there).
+  fragment_kinds:
+    sticker: 2.0
+    annotation: 2.0
+    blur_censor: 1.0
+    pixelate_censor: 1.0
+    black_box: 1.0
+    copy_move: 1.5
+    inpaint_fill: 1.5
+    recolor: 1.0
+  n_fragment_edits_probs: [0.7, 0.3]
+  region_shapes:
+    rect: 1.0
+    ellipse: 1.0
+    convex: 2.0
+    blob: 2.0
+  exclusive_groups:
+    - [jpeg_artefacts, noise_adding]
+    - [text_overlay, fragment_edit]
+  crop_pad_prob: 0.3
+  crop_pad_styles:
+    solid: 6.0
+    blur_extend: 2.0
+    mirror: 1.0
+  text_corpus_dir: null
+  text_langs: null
+  text_lang_weights: {}
+  text_layout_weights: {}
+  text_min_net_px: 9.0
+  font_dirs: []
+  sticker_dir: 'plagiarism_v2/assets/stickers'
+  sticker_asset_prob: 0.5
+  visibility_threshold: 0.6
+  visibility_min_frac: 0.006
+  visibility_retries: 2
+  token_p_scale: {}

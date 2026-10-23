@@ -1,0 +1,172 @@
+training:
+  start_epoch: 0
+  resume: False
+  num_epochs: 25
+  batch_size: 32
+  num_workers: 4
+  device: 'cuda:0'
+  checkpoint_interval: 1
+  checkpoint_dir: 'checkpoints/plagiarism_v2_pretrain'
+  val_size: 0.1
+  random_seed: 42
+
+  # Loss composition: total = w_seq * seq_CE + w_bce * BCE + w_nce * InfoNCE
+  loss_weights:
+    seq: 1.0
+    bce: 0.5
+    info_nce: 0.2
+
+  info_nce_temperature: 0.07
+  binary_threshold: 0.5
+
+  # Symmetric negatives: add mirror pairs (aug_j, orig_i) for all i != j.
+  symmetric_negatives: true
+
+  # Intentionally under-compensated to bias toward low FPR (same as v1).
+  bce_pos_weight: 1.0
+
+
+data:
+  tensorboard_logdir: 'logs/plagiarism_v2_pretrain'
+
+
+model:
+  model_name: 'plagiarism_v2_pretrain'
+  # Trained from scratch. If set, must be a v2 (vocab_size 16) raw state_dict.
+  initialization_weights_path: null
+
+  encoder:
+    type: 'effnet_plagiarism'
+    freeze_image_encoder: False
+    out_token_n_embd: 512
+    n_fused_tokens: 4
+    fuser_dropout: 0.1
+
+  decoder:
+    pos_encoding: 'learned'
+    rope_base: null
+    activation: 'gelu'
+    n_embd: 512
+    ffn_ratio: 4
+    n_head: 8
+    n_layer: 3
+    max_seq_len: 15
+    dropout: 0.1
+    bias: False
+    bos_token_id: 1
+    eos_token_id: 2
+    pad_token_id: 0
+    # v2 vocabulary: 13 v1 tokens + jpeg_artefacts + text_overlay + fragment_edit
+    vocab_size: 16
+
+  match_head:
+    hidden_dim: 512
+    dropout: 0.1
+
+  projection_head:
+    hidden_dim: 512
+    out_dim: 128
+
+
+optimizer:
+  name: 'AdamW'
+  lr: 0.001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+
+
+scheduler:
+  milestones: [5, 10, 15, 20]
+  gamma: 0.7
+
+
+augmentation:
+  # Per-token Bernoulli probability (v1 semantics). 12 non-noop tokens vs 10 in
+  # v1: p=0.3 gives a mean sequence length ~3.6 (v1: ~3.0); use 0.25 for ~3.0.
+  initial_p: 0.3
+  milestones: []
+  probs: []
+
+
+augmentation_v2:
+  # ---- fragment_edit: ONE token, fixed list of kinds with sampling weights ----
+  # (text is its own token, see "text" below). Allowed kinds: sticker, annotation,
+  # blur_censor, pixelate_censor, black_box, copy_move, inpaint_fill, recolor.
+  # Weight 0 disables a kind.
+  fragment_kinds:
+    sticker: 2.0
+    annotation: 2.0
+    blur_censor: 1.0
+    pixelate_censor: 1.0
+    black_box: 1.0
+    copy_move: 1.5
+    inpaint_fill: 1.5
+    recolor: 1.0
+  # How many local edits (of distinct kinds) one fragment_edit token applies:
+  # weights for 1, 2, ... edits.
+  n_fragment_edits_probs: [0.7, 0.3]
+  # Shape of the edited region (pixel mask): rect, ellipse, convex (random convex
+  # polygon), blob (smooth irregular brush-like outline). Weight 0 disables.
+  region_shapes:
+    rect: 1.0
+    ellipse: 1.0
+    convex: 2.0
+    blob: 2.0
+
+  # ---- crop = field of view changed (cut OR padded) ----
+  # With this probability the v1 crop is replaced by ADDING margins (frame, document
+  # margins, letterbox). Styles: solid (white/black/grey/mean/colour), blur_extend,
+  # mirror. A text_overlay in the caption_outside layout also yields a crop label.
+  crop_pad_prob: 0.3
+  crop_pad_styles:
+    solid: 6.0
+    blur_extend: 2.0
+    mirror: 1.0
+
+  # ---- compatibility rules between tokens ----
+  # At most one token per group in a sequence. Application order stays random (v1).
+  exclusive_groups:
+    - [jpeg_artefacts, noise_adding]     # two heavy degradations hide each other
+    - [text_overlay, fragment_edit]      # one local edit per pair
+
+  # ---- text_overlay token ----
+  # Real phrases ship in plagiarism_v2/assets/text/<lang>.txt. Optional extra
+  # corpus: any *.txt files (lines are sampled), e.g. wiki sentences or your docs.
+  text_corpus_dir: null
+  # Restrict languages (null = all that an installed font can render). Complex
+  # scripts (ar, hi, ...) are used only if Pillow has libraqm.
+  text_langs: null
+  # Relative language frequencies (missing -> defaults in overlays.py).
+  text_lang_weights:
+    en: 4.0
+    ru: 4.0
+  # Relative frequencies of text placements (missing -> defaults):
+  # corner_watermark, diagonal_watermark, caption_bar, caption_outside, subtitle,
+  # meme, label_tag, title, paragraph_block, timestamp, free.
+  text_layout_weights: {}
+  # Minimal text height in the network's 300x300 view (pixels); font sizes are
+  # raised so that text never becomes sub-pixel after preprocessing.
+  text_min_net_px: 9.0
+  # Extra font directories (system font folders are scanned automatically).
+  font_dirs: []
+
+  # ---- stickers ----
+  # Folder with PNG/WebP stickers (alpha channel). Optional; procedural stickers
+  # are always available. Must NOT contain training / negative-dataset images.
+  sticker_dir: 'plagiarism_v2/assets/stickers'
+  sticker_asset_prob: 0.5
+
+  # ---- observability (text_overlay and fragment_edit) ----
+  # An edit is kept in the label only if, at network resolution, the mean |RGB diff|
+  # is >= visibility_threshold (0..255; JPEG q95 re-encode is ~0.2-1.2) OR the
+  # fraction of pixels whose luminance changed by > 12 is >= visibility_min_frac
+  # (a small crisp watermark passes, a faint global haze does not).
+  visibility_threshold: 0.6
+  visibility_min_frac: 0.006
+  visibility_retries: 2
+
+  # Per-token multipliers of the sampling probability p (missing -> 1.0).
+  token_p_scale:
+    text_overlay: 1.0
+    fragment_edit: 1.0
+    jpeg_artefacts: 1.0
