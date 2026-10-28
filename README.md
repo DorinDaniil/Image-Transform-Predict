@@ -1,5 +1,5 @@
 <div align="center">
-<h1> Evidential Image Matching: Predicting Transformation Sequences to Derive one Image from Another </h1>
+<h1> From Similarity to Evidence: Image Copy Detection by Predicting Transformation Sequences </h1>
 
 [Daniil Dorin](https://github.com/DorinDaniil)<sup>1,2 :email:</sup>, [Kseniia Varlamova](https://github.com/varyxi)<sup>1,2</sup>, [Andrey Grabovoy](https://github.com/andriygav)<sup>2</sup>
 
